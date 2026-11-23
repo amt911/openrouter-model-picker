@@ -39,6 +39,11 @@ python3 ormp.py                       # menú interactivo en la terminal
   cuantización (fp4/fp8), nivel *flex*, uptime de 24 h y soporte de herramientas. El mismo
   modelo puede costar la mitad según quién lo sirva; el panel te dice cómo fijar el proveedor
   (`"provider": {"order": [...]}` o `{"sort": "price"}`).
+- **Tabla simple / Tabla completa**: la simple muestra solo calidad, coste y contexto; la
+  completa tiene una fila por modelo y proveedor con benchmarks, precios, caché, cuantización
+  y uptime, con filtros (más barato de cada modelo, con herramientas, sin 4 bits, uptime
+  ≥ 99%) y descarga en CSV. La primera vez descarga los proveedores de OpenRouter (unos
+  segundos; se guardan 1 h).
 - **Filtros de tabla**: por autor (deepseek, google…), solo frontera, y «mostrar con pocos
   datos» para ver los modelos que no llegan a la cobertura mínima (salen marcados y no
   entran en las recomendaciones).

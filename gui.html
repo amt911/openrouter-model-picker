@@ -58,6 +58,10 @@ tr.low td { opacity: .6; }
 select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
 #provPanel code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
 #table tbody tr { cursor: pointer; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { background: transparent; color: var(--muted); border-radius: 0; }
+.seg button.on { background: var(--accent); color: var(--on-accent); }
+td.sub { color: var(--muted); font-size: 12px; }
 #usageInfo { align-self: center; font-size: 12px; }
 .weights { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
@@ -151,11 +155,21 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
     </div>
     <div class="panel">
       <div class="tablebar"><b id="count"></b>
+        <span class="seg"><button id="viewSimple" class="on">Tabla simple</button><button id="viewFull">Tabla completa: proveedores, benchmarks y precios</button></span></div>
+      <div class="tablebar">
         <span class="controls" style="gap:10px;align-items:center"><select id="author"><option value="">Todos los autores</option></select>
         <label class="muted inline"><input id="showLow" type="checkbox"> mostrar <span id="lowN">0</span> con pocos datos</label>
         <label class="muted inline" id="onlyBetterBox"><input id="onlyBetter" type="checkbox"> solo mejores y más baratos que mi modelo</label>
         <label class="muted inline"><input id="onlyPareto" type="checkbox"> solo frontera</label>
         <input id="filter" type="text" placeholder="filtrar modelo…"></span></div>
+      <div class="tablebar hidden" id="fullBar">
+        <span class="controls" style="gap:10px;align-items:center">
+          <label class="muted inline"><input id="cheapestOnly" type="checkbox"> solo el proveedor más barato de cada modelo</label>
+          <label class="muted inline"><input id="toolsOnly" type="checkbox" checked> solo con herramientas (tools)</label>
+          <label class="muted inline"><input id="noFp4" type="checkbox"> sin 4 bits (fp4/int4)</label>
+          <label class="muted inline"><input id="upOnly" type="checkbox"> uptime 24 h ≥ 99%</label></span>
+        <button class="ghost" id="csv">Descargar CSV</button></div>
+      <p class="note hidden" id="fullNote"></p>
       <div class="scroll"><table id="table"></table></div>
     </div>
   </section>
@@ -347,22 +361,28 @@ function chart() {
   });
 }
 
-function table() {
-  const td = S.tasks[task], mk = Object.keys(td.weights), f = $("#filter").value.toLowerCase(), b = res.baseline;
+let view = "simple";
+function visibleModels() {
+  const f = $("#filter").value.toLowerCase(), b = res.baseline, au = $("#author").value;
   const better = r => b && r.quality > b.quality && r.task_cost < b.task_cost;
-  const au = $("#author").value;
-  let rs = rows.concat($("#showLow").checked ? res.low_coverage : [])
+  return rows.concat($("#showLow").checked ? res.low_coverage : [])
     .filter(r => (!f || r.id.toLowerCase().includes(f)) && (!au || r.author === au) && (!$("#onlyPareto").checked || r.pareto)
-    && (!b || !$("#onlyBetter").checked || better(r)));
+      && (!b || !$("#onlyBetter").checked || better(r)));
+}
+function table() { return view === "full" ? fullTable() : simpleTable(); }
+
+function simpleTable() {
+  const td = S.tasks[task], f = $("#filter").value.toLowerCase(), b = res.baseline, au = $("#author").value;
+  let rs = visibleModels();
   const val = (r, k) => k === "d_cost" ? (b ? r.task_cost / b.task_cost : 0) : k === "d_q" ? (b ? r.quality - b.quality : 0)
     : k in r ? r[k] : r.metrics[k] ?? -Infinity;
   rs.sort((a, c) => (sort.k === "id" ? a.id.localeCompare(c.id) : val(a, sort.k) - val(c, sort.k)) * (sort.asc ? 1 : -1));
-  $("#count").textContent = `${rs.length} modelos`;
+  $("#count").textContent = `${rs.length} modelos · clic en uno para ver sus proveedores`;
   const hidden = res.low_coverage.filter(r => !$("#showLow").checked && (!f || r.id.toLowerCase().includes(f)) && (!au || r.author === au)).length;
   if (hidden && (f || au)) $("#count").textContent += ` (+${hidden} ocultos por pocos datos)`;
   const cols = [["#", null], ["modelo", "id"], ["calidad", "quality"], ["cobert.", "coverage"],
     [monthly() ? "$/mes" : "$/" + td.unit, "task_cost"], ...(b ? [["Δ calidad", "d_q"], ["Δ coste", "d_cost"]] : []),
-    ["$ in/M", "price_in"], ["$ caché/M", "price_cache"], ["$ out/M", "price_out"], ["contexto", "context"], ...mk.map(k => [SHORT[k], k])];
+    ["contexto", "context"]];
   const cell = r => monthly() ? "$" + int(shown(r.task_cost)) : usd(r.task_cost);
   const delta = r => !b ? "" : `<td class="${r.quality - b.quality >= 0 ? "pos" : "neg"}">${r.quality - b.quality >= 0 ? "+" : ""}${(r.quality - b.quality).toFixed(1)}</td>
     <td class="${r.task_cost <= b.task_cost ? "pos" : "neg"}">${b.task_cost ? (r.task_cost / b.task_cost - 1 >= 0 ? "+" : "") + Math.round((r.task_cost / b.task_cost - 1) * 100) + "%" : "–"}</td>`;
@@ -370,12 +390,92 @@ function table() {
     rs.map((r, i) => `<tr class="${r.pareto ? "pareto" : ""} ${r.low ? "low" : ""} ${r.id === hl ? "hl" : ""} ${b && r.id === b.id ? "isbase" : ""}" data-id="${esc(r.id)}"><td class="muted">${i + 1}</td>
       <td>${r.pareto ? '<span class="star" title="frontera calidad/precio">★</span> ' : ""}${esc(r.id)}${r.low ? ' <span class="tag" title="Tiene pocos benchmarks para esta tarea: su calidad es poco fiable y no entra en las recomendaciones">pocos datos</span>' : ""}${r.variable_price ? ' <span class="muted" title="El precio cambia según la hora; se muestra la media de una semana de uso continuo">⏱</span>' : ""}</td>
       <td><span class="bar" style="width:${(r.quality * 0.6).toFixed(0)}px"></span>${r.quality.toFixed(1)}</td>
-      <td>${Math.round(r.coverage * 100)}%</td><td>${cell(r)}</td>${delta(r)}<td>${pm(r.price_in)}</td>
-      <td>${r.price_cache == null ? '<span class="muted" title="sin caché: paga toda la entrada">–</span>' : pm(r.price_cache)}</td><td>${pm(r.price_out)}</td><td>${kctx(r.context)}</td>
-      ${mk.map(k => `<td>${k in r.metrics ? r.metrics[k].toFixed(k === "da_coding_elo" ? 0 : 1) : '<span class="muted">–</span>'}</td>`).join("")}</tr>`).join("") + "</tbody>";
+      <td>${Math.round(r.coverage * 100)}%</td><td>${cell(r)}</td>${delta(r)}<td>${kctx(r.context)}</td></tr>`).join("") + "</tbody>";
   $("#table").querySelectorAll("th[data-k]").forEach(th => th.dataset.k && (th.onclick = () => {
     sort = {k: th.dataset.k, asc: sort.k === th.dataset.k ? !sort.asc : ["id", "task_cost", "price_in", "price_out", "price_cache", "d_cost"].includes(th.dataset.k)}; table(); }));
   $("#table").querySelectorAll("tbody tr").forEach(tr => tr.onclick = () => { hl = tr.dataset.id; chart(); table(); providers(hl); });
+}
+
+// ---- full table: one row per model x provider
+const provCache = new Map();  // key: profile + model id -> providers
+const profileKey = () => { const c = controls(); return [task, c.tokens_in, c.tokens_out, c.cache_hit].join("|"); };
+let fullSort = {k: "cost", asc: true}, fullSeq = 0, fullRows = [];
+
+async function fullTable() {
+  const seq = ++fullSeq, models = visibleModels(), pk = profileKey(), td = S.tasks[task], b = res.baseline;
+  const missing = models.map(m => m.id).filter(id => !provCache.has(pk + id));
+  $("#count").textContent = `${models.length} modelos`;
+  if (missing.length) {
+    $("#fullNote").classList.remove("hidden");
+    $("#fullNote").textContent = `Descargando proveedores de ${missing.length} modelos de OpenRouter (se guardan 1 h)…`;
+    let d;
+    try { d = await api("/api/providers_many", {...controls(), ids: missing}); }
+    catch (e) { $("#fullNote").textContent = "Error: " + e.message; return; }
+    for (const [id, ps] of Object.entries(d.providers)) if (!(id in d.errors)) provCache.set(pk + id, ps);
+    if (seq !== fullSeq) return;
+    const nerr = Object.keys(d.errors).length;
+    $("#fullNote").textContent = nerr ? `No se pudieron cargar ${nerr} modelos: ${Object.keys(d.errors).slice(0, 5).join(", ")}` : "";
+    $("#fullNote").classList.toggle("hidden", !nerr);
+  } else $("#fullNote").classList.add("hidden");
+  if (seq !== fullSeq) return;
+
+  const tools = $("#toolsOnly").checked, nofp4 = $("#noFp4").checked, up = $("#upOnly").checked, cheapest = $("#cheapestOnly").checked;
+  fullRows = [];
+  for (const m of models) {
+    let ps = (provCache.get(pk + m.id) || []).filter(p => (!tools || p.tools) && (!nofp4 || !/(fp|int)4/.test(p.quantization || ""))
+      && (!up || (p.uptime_1d ?? 0) >= 99));
+    if (cheapest) ps = ps.slice(0, 1);  // already sorted by cost
+    for (const p of ps) fullRows.push({m, p});
+  }
+  const mk = Object.keys(td.weights);
+  const val = (x, k) => k === "id" ? x.m.id : k === "provider" ? x.p.provider : k === "quality" ? x.m.quality
+    : k === "d_cost" ? (b ? x.p.cost / b.task_cost : 0) : k in x.p ? (x.p[k] ?? -Infinity) : x.m.metrics[k] ?? -Infinity;
+  fullRows.sort((a, c) => { const va = val(a, fullSort.k), vc = val(c, fullSort.k);
+    return (typeof va === "string" ? va.localeCompare(vc) : va - vc) * (fullSort.asc ? 1 : -1); });
+  $("#count").textContent = `${fullRows.length} ofertas de ${new Set(fullRows.map(x => x.m.id)).size} modelos`;
+  const cols = [["modelo", "id"], ["proveedor", "provider"], ["cuantiz.", null], ["calidad", "quality"],
+    [monthly() ? "$/mes" : "$/" + td.unit, "cost"], ...(b ? [["vs mi modelo", "d_cost"]] : []),
+    ["$ in/M", "price_in"], ["$ caché/M", "price_cache"], ["$ out/M", "price_out"], ["uptime 24 h", "uptime_1d"], ["tools", null],
+    ...mk.map(k => [SHORT[k], k])];
+  const fmtq = q => q && q !== "unknown" ? `<span class="tag">${esc(q)}</span>` : '<span class="muted">?</span>';
+  const shownRows = fullRows.slice(0, 1500);
+  $("#table").innerHTML = `<thead><tr>${cols.map(([n, k]) => `<th data-k="${k ?? ""}" title="${esc(S.metrics[k] ?? "")}" class="${k && k === fullSort.k ? "sorted" + (fullSort.asc ? " asc" : "") : ""}">${n}</th>`).join("")}</tr></thead><tbody>` +
+    shownRows.map(({m, p}) => `<tr class="${m.low ? "low" : ""} ${b && m.id === b.id ? "isbase" : ""}" data-id="${esc(m.id)}">
+      <td>${esc(m.id)}${m.low ? ' <span class="tag">pocos datos</span>' : ""}</td>
+      <td>${esc(p.provider)}${p.tier ? ` <span class="tag">${esc(p.tier)}</span>` : ""}${p.variable_price ? " ⏱" : ""}</td><td>${fmtq(p.quantization)}</td>
+      <td>${m.quality.toFixed(1)}</td><td>${monthly() ? "$" + int(shown(p.cost)) : usd(p.cost)}</td>
+      ${b ? `<td class="${p.cost <= b.task_cost ? "pos" : "neg"}">${b.task_cost ? (p.cost / b.task_cost - 1 >= 0 ? "+" : "") + Math.round((p.cost / b.task_cost - 1) * 100) + "%" : "–"}</td>` : ""}
+      <td>${pm(p.price_in)}</td><td>${p.price_cache == null ? "–" : pm(p.price_cache)}</td><td>${pm(p.price_out)}</td>
+      <td class="${(p.uptime_1d ?? 0) >= 99 ? "pos" : "neg"}">${p.uptime_1d == null ? "–" : p.uptime_1d.toFixed(1) + "%"}</td>
+      <td>${p.tools ? "✓" : '<span class="neg">✗</span>'}</td>
+      ${mk.map(k => `<td>${k in m.metrics ? m.metrics[k].toFixed(k === "da_coding_elo" ? 0 : 1) : '<span class="muted">–</span>'}</td>`).join("")}</tr>`).join("")
+    + (fullRows.length > shownRows.length ? `<tr><td colspan="99" class="muted">… ${fullRows.length - shownRows.length} filas más: filtra o descarga el CSV.</td></tr>` : "") + "</tbody>";
+  $("#table").querySelectorAll("th[data-k]").forEach(th => th.dataset.k && (th.onclick = () => {
+    const k = th.dataset.k;
+    fullSort = {k, asc: fullSort.k === k ? !fullSort.asc : ["id", "provider", "cost", "price_in", "price_out", "price_cache", "d_cost"].includes(k)}; fullTable(); }));
+  $("#table").querySelectorAll("tbody tr[data-id]").forEach(tr => tr.onclick = () => { hl = tr.dataset.id; chart(); providers(hl); });
+}
+
+function downloadCsv() {
+  const td = S.tasks[task], mk = Object.keys(td.weights), b = res.baseline;
+  const head = ["modelo", "proveedor", "variante", "nivel", "cuantizacion", "calidad", "cobertura",
+    monthly() ? "usd_mes" : "usd_por_" + td.unit.replace(/ /g, "_"), ...(b ? ["vs_mi_modelo_pct"] : []),
+    "usd_in_M", "usd_cache_M", "usd_out_M", "uptime_24h", "tools", ...mk];
+  const q = v => v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+  const lines = [head.join(",")].concat(fullRows.map(({m, p}) => [m.id, p.provider, p.tag, p.tier, p.quantization,
+    m.quality.toFixed(1), m.coverage.toFixed(2), shown(p.cost).toFixed(4), ...(b ? [b.task_cost ? Math.round((p.cost / b.task_cost - 1) * 100) : ""] : []),
+    p.price_in, p.price_cache, p.price_out, p.uptime_1d, p.tools, ...mk.map(k => m.metrics[k])].map(q).join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n")], {type: "text/csv"}));
+  a.download = `proveedores-${task}.csv`; a.click(); URL.revokeObjectURL(a.href);
+}
+
+function setView(v) {
+  view = v;
+  $("#viewSimple").classList.toggle("on", v === "simple"); $("#viewFull").classList.toggle("on", v === "full");
+  $("#fullBar").classList.toggle("hidden", v !== "full");
+  if (v !== "full") $("#fullNote").classList.add("hidden");
+  table();
 }
 
 let provSeq = 0;
@@ -461,6 +561,10 @@ $("#filter").oninput = table;
 $("#onlyPareto").onchange = table;
 $("#onlyBetter").onchange = table;
 $("#showLow").onchange = table;
+$("#viewSimple").onclick = () => setView("simple");
+$("#viewFull").onclick = () => setView("full");
+for (const id of ["#cheapestOnly", "#toolsOnly", "#noFp4", "#upOnly"]) $(id).onchange = table;
+$("#csv").onclick = downloadCsv;
 $("#author").onchange = table;
 $("#provClose").onclick = () => $("#provPanel").classList.add("hidden");
 $("#cq").oninput = () => { clearTimeout(cmpTimer); cmpTimer = setTimeout(compare, 250); };

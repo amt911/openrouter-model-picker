@@ -103,6 +103,20 @@ class GuiApi(unittest.TestCase):
         self.assertEqual(ps[0]["discount"], 0.5)
         self.assertAlmostEqual(ps[1]["price_in"], 1.0)
 
+    def test_providers_many_reports_failures_per_model(self):
+        ok = {"data": {"endpoints": [{"provider_name": "P", "model_id": "x/y", "context_length": 1,
+                                      "pricing": {"prompt": "0.000001", "completion": "0.000001"}}]}}
+
+        def fetch(mid):
+            if mid == "bad/model":
+                raise OSError("boom")
+            return ok
+        d = gui.providers_many_json({"task": "coding", "ids": ["x/y", "bad/model", "x/y"]}, fetch=fetch)
+        self.assertEqual(len(d["providers"]["x/y"]), 1)
+        self.assertEqual(d["providers"]["bad/model"], [])
+        self.assertIn("boom", d["errors"]["bad/model"])
+        self.assertNotIn("x/y", d["errors"])
+
     def test_compare(self):
         st, body = self.req("GET", "/api/models?q=big")
         self.assertEqual({m["id"] for m in json.loads(body)}, {"a/big", "a/big:free", "a/big:batch"})

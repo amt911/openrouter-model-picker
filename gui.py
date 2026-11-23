@@ -75,6 +75,25 @@ def providers_json(body: dict, fetch=ormp.fetch_endpoints) -> dict:
         "tools": e.tools, "discount": e.discount} for e in eps]}
 
 
+def providers_many_json(body: dict, fetch=ormp.fetch_endpoints, workers: int = 8) -> dict:
+    """Providers of several models at once for the full table. Each model is one request
+    to OpenRouter (cached 1 h); a model that fails is reported, not fatal."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    ids = list(dict.fromkeys(body.get("ids") or []))[:200]
+
+    def one(mid):
+        try:
+            return mid, providers_json({**body, "id": mid}, fetch)["providers"], None
+        except Exception as e:  # noqa: BLE001 - surfaced to the page per model
+            return mid, [], f"{type(e).__name__}: {e}"
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(one, ids))
+    return {"providers": {mid: ps for mid, ps, _ in results},
+            "errors": {mid: err for mid, _, err in results if err}}
+
+
 def rank_json(state: State, body: dict) -> dict:
     t = task_from(body)
     def opt(k):
@@ -172,6 +191,8 @@ def make_handler(state: State, port: int):
                     self._json(rank_json(state, body))
                 elif path == "/api/providers":
                     self._json(providers_json(body))
+                elif path == "/api/providers_many":
+                    self._json(providers_many_json(body))
                 elif path == "/api/key":
                     # No "key" in the body (e.g. "refresh") keeps the current key.
                     key = body["key"].strip() if isinstance(body.get("key"), str) else None
