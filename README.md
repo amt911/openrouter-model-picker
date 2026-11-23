@@ -33,6 +33,17 @@ en la terminal. Para cada sección:
 3. Elige: si «Calidad» cuesta menos de $20 al mes con tu volumen, gana la calidad (no compensa
    ahorrar céntimos); si no, el ahorro y después la mejora.
 
+Cada sección tiene su **price cap** (máximo $ por millón de tokens de entrada y de salida):
+descarta proveedores más caros y sale en el bloque para OpenRouter que trae cada tarjeta:
+
+```json
+"provider": {"order": ["pearl-research/fp8", "deepinfra/fp8/flex", "antdigital/fp8"],
+             "allow_fallbacks": true, "max_price": {"prompt": 0.1, "completion": 0.45}}
+```
+
+Sin cap, `max_price` es el precio del más caro de los tres proveedores propuestos, para que un
+respaldo nunca cueste más de lo recomendado. En la terminal: `--max-in` y `--max-out`.
+
 Usa el volumen y el gasto real de «Tu uso» de cada pestaña, y muestra el total antes y después
 y cómo fijar cada proveedor.
 

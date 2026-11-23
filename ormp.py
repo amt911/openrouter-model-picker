@@ -401,17 +401,40 @@ class Offer:
     row: Row
     endpoint: Endpoint | None  # cheapest reliable provider; None = catalog price (no data)
     cost: float  # USD per unit with that provider
+    fallbacks: list[Endpoint] = field(default_factory=list)  # next cheapest reliable providers
+
+    def routing(self, max_in: float | None = None, max_out: float | None = None) -> dict | None:
+        """OpenRouter `provider` preferences for this offer: the chosen provider first, two
+        reliable fallbacks, and a `max_price` cap (USD per million tokens). Without a cap from
+        the user, the cap is the dearest of those three, so a fallback outside the list can
+        never cost more than what was recommended."""
+        if not self.endpoint:
+            return None
+        eps = [self.endpoint, *self.fallbacks]
+        def cap(user, attr):
+            v = user if user is not None else max(getattr(e.model, attr) for e in eps) * 1e6
+            return float(f"{v:.6g}")
+        return {"order": [e.tag for e in eps], "allow_fallbacks": True,
+                "max_price": {"prompt": cap(max_in, "price_in"), "completion": cap(max_out, "price_out")}}
 
 
-def best_offer(row: Row, t: Task, endpoints_for) -> Offer | None:
+def under_caps(m: Model, max_in: float | None, max_out: float | None) -> bool:
+    """Price caps in USD per million tokens, as OpenRouter's max_price uses them."""
+    return (max_in is None or m.price_in * 1e6 <= max_in + 1e-12) and \
+        (max_out is None or m.price_out * 1e6 <= max_out + 1e-12)
+
+
+def best_offer(row: Row, t: Task, endpoints_for, max_in: float | None = None,
+               max_out: float | None = None) -> Offer | None:
     try:
-        eps = [e for e in parse_endpoints(endpoints_for(row.model.id)) if reliable(e, t)]
+        eps = [e for e in parse_endpoints(endpoints_for(row.model.id))
+               if reliable(e, t) and under_caps(e.model, max_in, max_out)]
     except Exception:  # noqa: BLE001 - no provider data: fall back to the catalog price
-        return Offer(row, None, row.cost)
+        return Offer(row, None, row.cost) if under_caps(row.model, max_in, max_out) else None
     if not eps:
-        return None  # nobody serves it reliably: do not recommend it
-    e = min(eps, key=lambda e: e.model.cost(t))
-    return Offer(row, e, e.model.cost(t))
+        return None  # nobody serves it reliably within the caps: do not recommend it
+    eps.sort(key=lambda e: e.model.cost(t))
+    return Offer(row, eps[0], eps[0].model.cost(t), eps[1:3])
 
 
 @dataclass
@@ -428,7 +451,8 @@ class Advice:
 
 def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None = None,
            per_month: float | None = None, negligible: float = NEGLIGIBLE_USD,
-           min_coverage: float = 0.5) -> Advice:
+           min_coverage: float = 0.5, max_in: float | None = None, max_out: float | None = None,
+           budget: float | None = None) -> Advice:
     """The recommendation algorithm, per task:
     1. Rank models (benchmarks, coverage >= min_coverage, no :free) and price each one with
        its cheapest reliable provider (see `reliable`).
@@ -438,10 +462,16 @@ def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None 
        the cheapest one reaching 75%.
     3. Pick: if "calidad" costs under `negligible` USD a month at your volume, quality wins
        (saving cents is not worth worse answers); otherwise the saving on your own model,
-       then the upgrade, then the balance."""
+       then the upgrade, then the balance.
+    Price caps: providers above max_in/max_out (USD per million tokens) are ignored, and
+    offers above `budget` USD a month are dropped; the routing snippet carries the caps."""
     per_month = per_month or DEFAULT_PER_MONTH.get(t.key, 100)
     rows = rank(models, t, min_coverage)
-    offers = [o for o in (best_offer(r, t, endpoints_for) for r in rows) if o]
+
+    def offer_for(r):
+        o = best_offer(r, t, endpoints_for, max_in, max_out)
+        return o if o and (budget is None or o.cost * per_month <= budget + 1e-9) else None
+    offers = [o for o in map(offer_for, rows) if o]
     adv = Advice(t, per_month, baseline_row(models, t, baseline_id), [], None)
     if not offers:
         return adv
@@ -457,7 +487,7 @@ def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None 
 
     b = adv.baseline
     if b:
-        mine = best_offer(b, t, endpoints_for)
+        mine = offer_for(b)
         if mine and mine.endpoint and mine.cost < b.cost * 0.95:
             adv.picks.append(("ahorro", mine, "Tu mismo modelo con el proveedor fiable más barato: mismos "
                               f"resultados, {(1 - mine.cost / b.cost) * 100:.0f}% menos que el precio de catálogo."))
@@ -560,7 +590,7 @@ def print_advice(models, opts) -> None:
     total_now = total_new = 0.0
     for t in TASKS.values():
         pm = opts.per_month if (opts.per_month and t.key == "coding") else None
-        adv = advise(models, t, fetch_endpoints, opts.baseline, pm)
+        adv = advise(models, t, fetch_endpoints, opts.baseline, pm, max_in=opts.max_in, max_out=opts.max_out)
         print(f"\n{BOLD}{CYAN}== {t.name} =={RESET}  ({adv.per_month:,.0f} {t.units}/mes)")
         if adv.baseline:
             now = adv.monthly(adv.baseline.cost)
@@ -578,9 +608,15 @@ def print_advice(models, opts) -> None:
             print(DIM + "      " + why + RESET)
             if role == adv.main:
                 total_new += adv.monthly(o.cost)
+                rt = o.routing(opts.max_in, opts.max_out)
+                if rt:
+                    print(DIM + '      "provider": ' + json.dumps(rt) + RESET)
     if total_now:
         print(f"\n{BOLD}Total:{RESET} ≈ ${total_now:,.2f}/mes ahora → ≈ ${total_new:,.2f}/mes con lo recomendado")
-    print(DIM + "Para fijar un proveedor en OpenRouter: \"provider\": {\"order\": [\"<variante>\"]}" + RESET)
+    if opts.max_in is not None or opts.max_out is not None:
+        print(YELLOW + f"Price cap: entrada ≤ ${opts.max_in}/M, salida ≤ ${opts.max_out}/M" + RESET)
+    print(DIM + "Pega el bloque \"provider\" en tu petición a OpenRouter: va al proveedor recomendado, "
+          "usa los de respaldo si falla y max_price impide pagar más." + RESET)
 
 
 def compare(models: list[Model], query: str) -> None:

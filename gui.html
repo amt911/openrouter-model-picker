@@ -65,6 +65,8 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 .pick.main .role { color: var(--good); }
 .pick .id { font-weight: 600; margin: 4px 0; word-break: break-all; }
 .pick .why { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.capbox { gap: 10px; } .capbox input { width: 90px; }
+pre.snip { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; overflow-x: auto; margin: 6px 0; }
 .total { font-size: 15px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { background: transparent; color: var(--muted); border-radius: 0; }
@@ -192,6 +194,9 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
         (uptime 24 h ≥ 99%, sin 4 bits y, para programar, con herramientas) y propone: <b>Ahorro</b> (tu mismo modelo con ese proveedor),
         <b>Mejora</b> (lo mejor que supera al tuyo y cuesta menos de lo que pagas), <b>Calidad</b> (lo más barato con ≥ 90% de la mejor calidad).
         Si «Calidad» te cuesta menos de <b id="negl">$20</b> al mes con tu volumen, gana la calidad; si no, el ahorro.
+        El <b>price cap</b> de cada sección descarta proveedores más caros y va en el bloque para OpenRouter (<code>max_price</code>); sin cap, se pone el
+        precio del más caro de los tres proveedores propuestos, para que nunca pagues más de lo recomendado.
+        El presupuesto mensual de cada pestaña también se respeta.
         El volumen y el gasto real se ajustan en «Tu uso» de cada pestaña (sin ajustar: 1 sesión × 8 h × 22 días en programar y 100 al mes en el resto).</p>
     </div>
     <div id="recOut"></div>
@@ -225,6 +230,9 @@ const prefs = {};  // per-task profile tweaks for this session
 const LS = "ormp.limits", LU = "ormp.usage";
 const load = k => { try { return JSON.parse(localStorage.getItem(k) || "{}"); } catch (e) { return {}; } };
 let limits = load(LS), usage = load(LU);
+// Caps per million tokens used to be global numbers; they are per task now.
+for (const k of ["max_in", "max_out"]) if (typeof limits[k] === "number")
+  limits[k] = {coding: limits[k], rewrite: limits[k], papers: limits[k]};
 const saveLimits = () => { try { localStorage.setItem(LS, JSON.stringify(limits)); } catch (e) {} };
 const saveUsage = () => { try { localStorage.setItem(LU, JSON.stringify(usage)); } catch (e) {} };
 const num = v => v === "" || v == null || isNaN(+v) ? null : +v;
@@ -263,7 +271,7 @@ function controls(task_ = task) {
   return {task, tokens_in: p.tokens_in ?? t.tokens_in, tokens_out: p.tokens_out ?? t.tokens_out,
     cache_hit: p.cache_hit ?? t.cache_hit,
     min_context: p.min_context ?? t.min_context, min_coverage: p.min_coverage ?? 0.5, include_free: p.include_free ?? false,
-    max_cost: per(limits.max_cost, task), max_in: limits.max_in ?? null, max_out: limits.max_out ?? null,
+    max_cost: per(limits.max_cost, task), max_in: per(limits.max_in, task), max_out: per(limits.max_out, task),
     budget: per(limits.budget, task), baseline: usage.baseline || null, spend: per(usage.spend, task),
     per_month: task === "coding" ? sessionHours() : per(usage.units, task)};
 }
@@ -561,20 +569,36 @@ async function recommend() {
         <div class="nums">calidad <b>${p.quality.toFixed(1)}</b> · <b>${m$(p.monthly)}</b>/mes
           ${t.baseline ? `<span class="${p.monthly <= t.baseline.monthly ? "pos" : "neg"}">(${p.monthly / t.baseline.monthly - 1 >= 0 ? "+" : ""}${Math.round((p.monthly / t.baseline.monthly - 1) * 100)}%)</span>` : ""}</div>
         <div class="why">${esc(p.why)}</div>
-        ${p.tag ? `<div class="why">Fijar proveedor: <code>"provider": {"order": ["${esc(p.tag)}"]}</code> <button class="ghost copy" data-c='"provider": {"order": ["${esc(p.tag)}"]}'>copiar</button></div>` : ""}
+        ${p.routing ? `<div class="why">Para OpenRouter (proveedor, 2 de respaldo y price cap):</div>
+          <pre class="snip">${esc('"provider": ' + JSON.stringify(p.routing, null, 2))}</pre>
+          <button class="ghost copy" data-c="${esc('"provider": ' + JSON.stringify(p.routing, null, 2))}">copiar</button>` : ""}
       </div>`;
-    return `<div class="panel"><div class="tablebar"><b>${esc(t.name)}</b>
+    const caps = [t.caps.max_in != null && `entrada ≤ $${t.caps.max_in}/M`, t.caps.max_out != null && `salida ≤ $${t.caps.max_out}/M`,
+      t.caps.budget != null && `presupuesto ≤ $${t.caps.budget}/mes`].filter(Boolean);
+    const capIn = (k, v, step) => `<input class="cap" data-task="${t.task}" data-k="${k}" type="number" min="0" step="${step}" placeholder="sin límite" value="${v ?? ""}">`;
+    return `<div class="panel"><div class="tablebar"><b>${esc(t.name)}${caps.length ? ` <span class="tag">${esc(caps.join(" · "))}</span>` : ""}</b>
+        <span class="controls capbox" title="max_price de OpenRouter para esta sección: ningún proveedor por encima de esto">
+          <label>Price cap entrada $/M ${capIn("max_in", t.caps.max_in, 0.01)}</label>
+          <label>Price cap salida $/M ${capIn("max_out", t.caps.max_out, 0.05)}</label></span></div>
+      <div class="tablebar">
         <span class="muted">${int(t.per_month)} ${esc(t.units)}/mes${t.baseline ? ` · ahora: ${esc(t.baseline.id)}, calidad ${t.baseline.quality.toFixed(1)}, ${m$(t.baseline.monthly)}/mes` : ""}</span></div>
-      ${t.picks.length ? `<div class="recgrid">${t.picks.map(pick).join("")}</div>` : `<div class="banner">Sin recomendación: faltan benchmarks o proveedores fiables (¿has puesto la API key?).</div>`}</div>`;
+      ${t.picks.length ? `<div class="recgrid">${t.picks.map(pick).join("")}</div>` : `<div class="banner">${caps.length ? "Ningún proveedor fiable cabe en tu price cap o presupuesto de esta sección: súbelo." : "Sin recomendación: faltan benchmarks o proveedores fiables (¿has puesto la API key?)."}</div>`}</div>`;
   }).join("");
   out.innerHTML = (anyBase ? `<div class="panel total">Total: <b>${m$(now)}/mes</b> ahora → <b>${m$(rec)}/mes</b> con lo recomendado
       <span class="${rec <= now ? "pos" : "neg"}">(${rec / now - 1 >= 0 ? "+" : ""}${Math.round((rec / now - 1) * 100)}%)</span></div>`
     : `<div class="panel muted">Pon tu modelo actual arriba para ver cuánto ahorras frente a lo que usas hoy.</div>`) + html;
+  out.querySelectorAll("input.cap").forEach(inp => inp.addEventListener("change", () => {
+    limits[inp.dataset.k] = {...(limits[inp.dataset.k] || {}), [inp.dataset.task]: num(inp.value)}; saveLimits(); recommend();
+  }));
   out.querySelectorAll("button.copy").forEach(b => b.onclick = async () => {
     try { await navigator.clipboard.writeText(b.dataset.c); b.textContent = "copiado"; } catch (e) { b.textContent = "no se pudo copiar"; }
   });
 }
-$("#recRun").onclick = () => { usage.baseline = $("#recBaseline").value.trim() || null; saveUsage(); recommend(); };
+$("#recRun").onclick = () => {
+  usage.baseline = $("#recBaseline").value.trim() || null; saveUsage();
+  recommend();
+};
+
 $("#recBaseline").addEventListener("change", () => $("#recRun").click());
 
 let cmpTimer;
@@ -616,8 +640,8 @@ function bindStored(id, set, save, mark = true) {
 }
 bindStored("#maxCost", v => limits.max_cost = {...(limits.max_cost || {}), [task]: v}, saveLimits);
 bindStored("#budget", v => limits.budget = {...(limits.budget || {}), [task]: v}, saveLimits);
-bindStored("#maxIn", v => limits.max_in = v, saveLimits);
-bindStored("#maxOut", v => limits.max_out = v, saveLimits);
+bindStored("#maxIn", v => limits.max_in = {...(limits.max_in || {}), [task]: v}, saveLimits);
+bindStored("#maxOut", v => limits.max_out = {...(limits.max_out || {}), [task]: v}, saveLimits);
 bindStored("#units", v => usage.units = {...(usage.units || {}), [task]: v}, saveUsage, false);
 bindStored("#spend", v => usage.spend = {...(usage.spend || {}), [task]: v}, saveUsage, false);
 for (const k of ["sessions", "hours", "days"])

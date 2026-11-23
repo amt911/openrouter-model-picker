@@ -285,6 +285,34 @@ class Advisor(unittest.TestCase):
         self.assertIn("equilibrio", [r for r, _, _ in adv.picks])
         self.assertIsNone(adv.baseline)
 
+    def test_price_cap_skips_dearer_providers(self):
+        self.eps["b/mid"] = [ep("Cheap", 5e-7, 2e-6), ep("Dear", 9e-7, 3e-6)]
+        rows = ormp.rank(self.models, ormp.TASKS["rewrite"])
+        b = next(r for r in rows if r.model.id == "b/mid")
+        o = ormp.best_offer(b, ormp.TASKS["rewrite"], self.endpoints_for, max_in=0.6, max_out=2.5)
+        self.assertEqual(o.endpoint.provider, "Cheap")
+        self.assertEqual(o.fallbacks, [])
+        self.assertIsNone(ormp.best_offer(b, ormp.TASKS["rewrite"], self.endpoints_for, max_in=0.1))
+
+    def test_routing_snippet(self):
+        self.eps["b/mid"] = [ep("A", 5e-7, 2e-6), ep("B", 6e-7, 1e-6), ep("C", 7e-7, 3e-6), ep("D", 8e-7, 4e-6)]
+        b = ormp.baseline_row(self.models, ormp.TASKS["rewrite"], "b/mid")
+        o = ormp.best_offer(b, ormp.TASKS["rewrite"], self.endpoints_for)
+        r = o.routing()
+        self.assertEqual(len(r["order"]), 3)
+        self.assertTrue(r["allow_fallbacks"])
+        # default cap = the dearest of the three proposed providers, per million tokens
+        listed = [e for e in ormp.parse_endpoints(self.endpoints_for("b/mid")) if e.tag in r["order"]]
+        self.assertAlmostEqual(r["max_price"]["prompt"], max(e.model.price_in for e in listed) * 1e6)
+        self.assertAlmostEqual(r["max_price"]["completion"], max(e.model.price_out for e in listed) * 1e6)
+        self.assertEqual(o.routing(0.55, 9)["max_price"], {"prompt": 0.55, "completion": 9.0})
+
+    def test_caps_and_budget_in_advise(self):
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10, max_out=1.0)
+        self.assertTrue(all(o.endpoint.model.price_out * 1e6 <= 1.0 for _, o, _ in adv.picks))
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10, budget=1e-9)
+        self.assertEqual(adv.picks, [])
+
     def test_fetch_failure_falls_back_to_catalog_price(self):
         def broken(mid):
             raise OSError("offline")

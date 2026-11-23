@@ -129,19 +129,24 @@ def recommend_json(state: State, body: dict, fetch=ormp.fetch_endpoints) -> dict
                 raise v or KeyError(mid)
             return v
 
-        adv = ormp.advise(state.models, t, endpoints_for, baseline, per_month)
+        def num(k, tb=tb):
+            v = tb.get(k)
+            return float(v) if v not in (None, "") else None
+        max_in, max_out = num("max_in"), num("max_out")
+        adv = ormp.advise(state.models, t, endpoints_for, baseline, per_month,
+                          max_in=max_in, max_out=max_out, budget=num("budget"))
 
         def offer(o):
             e = o.endpoint
             return {"id": o.row.model.id, "quality": o.row.quality, "coverage": o.row.coverage,
                     "monthly": adv.monthly(o.cost), "cost": o.cost,
                     "provider": e and e.provider, "tag": e and e.tag, "tier": e and e.tier,
-                    "quantization": e and e.quantization}
+                    "quantization": e and e.quantization, "routing": o.routing(max_in, max_out)}
         out.append({
             "task": key, "name": t.name, "unit": t.unit, "units": t.units, "per_month": adv.per_month,
             "baseline": adv.baseline and {"id": adv.baseline.model.id, "quality": adv.baseline.quality,
                                           "monthly": adv.monthly(adv.baseline.cost)},
-            "main": adv.main,
+            "main": adv.main, "caps": {"max_in": max_in, "max_out": max_out, "budget": num("budget")},
             "picks": [{"role": r, "why": why, **offer(o)} for r, o, why in adv.picks]})
     return {"tasks": out, "negligible": ormp.NEGLIGIBLE_USD}
 
