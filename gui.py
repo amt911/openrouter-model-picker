@@ -94,6 +94,58 @@ def providers_many_json(body: dict, fetch=ormp.fetch_endpoints, workers: int = 8
             "errors": {mid: err for mid, _, err in results if err}}
 
 
+def prefetch(ids, fetch=ormp.fetch_endpoints, workers: int = 8) -> dict:
+    """Download provider lists in parallel; failures are kept as exceptions so the advisor
+    falls back to catalog prices for those models instead of crashing."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(mid):
+        try:
+            return mid, fetch(mid)
+        except Exception as e:  # noqa: BLE001
+            return mid, e
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return dict(ex.map(one, list(dict.fromkeys(ids))))
+
+
+def recommend_json(state: State, body: dict, fetch=ormp.fetch_endpoints) -> dict:
+    """Runs ormp.advise for every task with the GUI's per-task profile and usage."""
+    baseline = body.get("baseline") or None
+    out = []
+    for key, tb in (body.get("tasks") or {k: {} for k in ormp.TASKS}).items():
+        t = task_from({**tb, "task": key})
+        b = ormp.baseline_row(state.models, t, baseline)
+        per_month = float(tb["per_month"]) if tb.get("per_month") else None
+        spend = float(tb["spend"]) if tb.get("spend") else None
+        if b and spend and b.cost > 0:
+            per_month = spend / b.cost
+        ids = [r.model.id for r in ormp.rank(state.models, t, 0.5)] + ([baseline] if baseline else [])
+        got = prefetch(ids, fetch)
+
+        def endpoints_for(mid, got=got):
+            v = got.get(mid)
+            if isinstance(v, Exception) or v is None:
+                raise v or KeyError(mid)
+            return v
+
+        adv = ormp.advise(state.models, t, endpoints_for, baseline, per_month)
+
+        def offer(o):
+            e = o.endpoint
+            return {"id": o.row.model.id, "quality": o.row.quality, "coverage": o.row.coverage,
+                    "monthly": adv.monthly(o.cost), "cost": o.cost,
+                    "provider": e and e.provider, "tag": e and e.tag, "tier": e and e.tier,
+                    "quantization": e and e.quantization}
+        out.append({
+            "task": key, "name": t.name, "unit": t.unit, "units": t.units, "per_month": adv.per_month,
+            "baseline": adv.baseline and {"id": adv.baseline.model.id, "quality": adv.baseline.quality,
+                                          "monthly": adv.monthly(adv.baseline.cost)},
+            "main": adv.main,
+            "picks": [{"role": r, "why": why, **offer(o)} for r, o, why in adv.picks]})
+    return {"tasks": out, "negligible": ormp.NEGLIGIBLE_USD}
+
+
 def rank_json(state: State, body: dict) -> dict:
     t = task_from(body)
     def opt(k):
@@ -191,6 +243,8 @@ def make_handler(state: State, port: int):
                     self._json(rank_json(state, body))
                 elif path == "/api/providers":
                     self._json(providers_json(body))
+                elif path == "/api/recommend":
+                    self._json(recommend_json(state, body))
                 elif path == "/api/providers_many":
                     self._json(providers_many_json(body))
                 elif path == "/api/key":

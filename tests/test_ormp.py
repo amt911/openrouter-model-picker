@@ -224,6 +224,75 @@ class Baseline(unittest.TestCase):
         self.assertIn("Mejor y más barato", label)
 
 
+def ep(provider, pin, pout, quant="fp8", uptime=100, tools=True, cache=None):
+    pricing = {"prompt": str(pin), "completion": str(pout)}
+    if cache is not None:
+        pricing["input_cache_read"] = str(cache)
+    return {"provider_name": provider, "tag": provider.lower(), "quantization": quant, "uptime_last_1d": uptime,
+            "context_length": 10**6, "pricing": pricing, "supported_parameters": ["tools"] if tools else []}
+
+
+class Advisor(unittest.TestCase):
+    def setUp(self):
+        self.m, _ = build()
+        self.models = list(self.m.values())
+        self.eps = {
+            # b/mid: catalog 1e-6/4e-6; a cheap reliable provider and cheaper unreliable ones
+            "b/mid": [ep("Good", 5e-7, 2e-6), ep("Flaky", 1e-8, 1e-8, uptime=90),
+                      ep("Tiny", 1e-8, 1e-8, quant="fp4"), ep("NoTools", 1e-8, 1e-8, tools=False)],
+            "a/big": [ep("Big", 3e-6, 15e-6)],
+            "c/cheap": [ep("C", 1e-7, 4e-7)],
+        }
+
+    def endpoints_for(self, mid):
+        return {"data": {"endpoints": self.eps.get(mid, [])}}
+
+    def test_reliable_filter(self):
+        t = ormp.TASKS["coding"]
+        got = [e.provider for e in ormp.parse_endpoints(self.endpoints_for("b/mid")) if ormp.reliable(e, t)]
+        self.assertEqual(got, ["Good"])
+        t = ormp.TASKS["rewrite"]  # tools only matter for coding
+        got = {e.provider for e in ormp.parse_endpoints(self.endpoints_for("b/mid")) if ormp.reliable(e, t)}
+        self.assertEqual(got, {"Good", "NoTools"})
+
+    def test_saving_on_own_model_wins_when_quality_is_expensive(self):
+        t = ormp.TASKS["rewrite"]
+        adv = ormp.advise(self.models, t, self.endpoints_for, "b/mid", per_month=10**6)
+        roles = {r: o for r, o, _ in adv.picks}
+        self.assertEqual(roles["ahorro"].row.model.id, "b/mid")
+        self.assertEqual(roles["ahorro"].endpoint.provider, "NoTools")  # cheapest reliable for a non-coding task
+        self.assertEqual(roles["calidad"].row.model.id, "a/big")
+        self.assertEqual(adv.main, "ahorro")
+
+    def test_quality_wins_when_cheap_in_absolute_terms(self):
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10)
+        self.assertEqual(adv.main, "calidad")
+
+    def test_upgrade_must_beat_quality_and_current_price(self):
+        self.eps["a/big"] = [ep("BigCheap", 1e-7, 1e-7)]
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10**6)
+        roles = {r: o for r, o, _ in adv.picks}
+        self.assertEqual(roles["mejora"].row.model.id, "a/big")
+        self.assertNotIn("calidad", roles)  # same model and provider as "mejora": deduplicated
+
+    def test_unreliable_only_model_is_not_recommended(self):
+        self.eps["a/big"] = [ep("Down", 1e-9, 1e-9, uptime=50)]
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, None, per_month=10)
+        self.assertNotIn("a/big", [o.row.model.id for _, o, _ in adv.picks])
+
+    def test_without_baseline_offers_balance(self):
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, None, per_month=10**6)
+        self.assertIn("equilibrio", [r for r, _, _ in adv.picks])
+        self.assertIsNone(adv.baseline)
+
+    def test_fetch_failure_falls_back_to_catalog_price(self):
+        def broken(mid):
+            raise OSError("offline")
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], broken, "b/mid", per_month=10)
+        self.assertTrue(adv.picks)
+        self.assertTrue(all(o.endpoint is None for _, o, _ in adv.picks))
+
+
 class EndToEnd(unittest.TestCase):
     def test_show_task_prints_recommendation(self):
         import io, contextlib, argparse

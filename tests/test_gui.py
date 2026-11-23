@@ -117,6 +117,20 @@ class GuiApi(unittest.TestCase):
         self.assertIn("boom", d["errors"]["bad/model"])
         self.assertNotIn("x/y", d["errors"])
 
+    def test_recommend_all_tasks(self):
+        fake = {"data": {"endpoints": [{"provider_name": "P", "tag": "p", "quantization": "fp8", "uptime_last_1d": 100,
+                                        "context_length": 10**6, "supported_parameters": ["tools"],
+                                        "pricing": {"prompt": "0.0000001", "completion": "0.0000001"}}]}}
+        d = gui.recommend_json(self.state, {"baseline": "b/mid", "tasks": {
+            "rewrite": {"per_month": 10}, "papers": {"spend": 50}}}, fetch=lambda mid: fake)
+        self.assertEqual([t["task"] for t in d["tasks"]], ["rewrite", "papers"])
+        rw = d["tasks"][0]
+        self.assertEqual(rw["per_month"], 10)
+        self.assertIn(rw["main"], [p["role"] for p in rw["picks"]])
+        self.assertEqual(rw["picks"][0]["provider"], "P")
+        pa = d["tasks"][1]
+        self.assertAlmostEqual(pa["baseline"]["monthly"], 50)  # calibrated from the real bill
+
     def test_compare(self):
         st, body = self.req("GET", "/api/models?q=big")
         self.assertEqual({m["id"] for m in json.loads(body)}, {"a/big", "a/big:free", "a/big:batch"})

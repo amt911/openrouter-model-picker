@@ -21,6 +21,21 @@ python3 ormp.py --gui                 # interfaz gráfica en el navegador
 python3 ormp.py                       # menú interactivo en la terminal
 ```
 
+### Recomendación automática
+
+Pestaña **★ Recomendación** en la GUI, o `python3 ormp.py --recommend --baseline <tu modelo> --per-month <horas de sesión>`
+en la terminal. Para cada sección:
+
+1. Puntúa los modelos con los benchmarks y busca el **proveedor fiable más barato** de cada uno
+   (uptime 24 h ≥ 99%, sin 4 bits y, para programar, con herramientas).
+2. Propone **Ahorro** (tu mismo modelo con ese proveedor), **Mejora** (el mejor que supera al tuyo y
+   cuesta menos de lo que pagas hoy) y **Calidad** (el más barato con ≥ 90% de la mejor calidad).
+3. Elige: si «Calidad» cuesta menos de $20 al mes con tu volumen, gana la calidad (no compensa
+   ahorrar céntimos); si no, el ahorro y después la mejora.
+
+Usa el volumen y el gasto real de «Tu uso» de cada pestaña, y muestra el total antes y después
+y cómo fijar cada proveedor.
+
 ### Interfaz gráfica
 
 `python3 ormp.py --gui` abre la GUI en el navegador (servidor local en

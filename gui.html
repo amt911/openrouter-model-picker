@@ -58,6 +58,14 @@ tr.low td { opacity: .6; }
 select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
 #provPanel code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
 #table tbody tr { cursor: pointer; }
+.recgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.pick { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--panel); }
+.pick.main { border: 2px solid var(--good); background: var(--good-soft); }
+.pick .role { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.pick.main .role { color: var(--good); }
+.pick .id { font-weight: 600; margin: 4px 0; word-break: break-all; }
+.pick .why { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.total { font-size: 15px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { background: transparent; color: var(--muted); border-radius: 0; }
 .seg button.on { background: var(--accent); color: var(--on-accent); }
@@ -174,6 +182,21 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
     </div>
   </section>
 
+  <section id="recView" class="hidden">
+    <div class="panel">
+      <div class="controls">
+        <label>Mi modelo actual <input id="recBaseline" type="text" list="ids" placeholder="p. ej. deepseek/deepseek-v4.1-flash-1017" size="38"></label>
+        <button id="recRun">Calcular recomendación</button>
+      </div>
+      <p class="note">Para cada sección: puntúa los modelos con los benchmarks, busca el <b>proveedor fiable más barato</b> de cada uno
+        (uptime 24 h ≥ 99%, sin 4 bits y, para programar, con herramientas) y propone: <b>Ahorro</b> (tu mismo modelo con ese proveedor),
+        <b>Mejora</b> (lo mejor que supera al tuyo y cuesta menos de lo que pagas), <b>Calidad</b> (lo más barato con ≥ 90% de la mejor calidad).
+        Si «Calidad» te cuesta menos de <b id="negl">$20</b> al mes con tu volumen, gana la calidad; si no, el ahorro.
+        El volumen y el gasto real se ajustan en «Tu uso» de cada pestaña (sin ajustar: 1 sesión × 8 h × 22 días en programar y 100 al mes en el resto).</p>
+    </div>
+    <div id="recOut"></div>
+  </section>
+
   <section id="compareView" class="hidden">
     <div class="panel">
       <div class="controls">
@@ -223,7 +246,7 @@ function setState(s) {
   $("#nokey").classList.toggle("hidden", s.has_key && s.n_bench > 0);
   if (s.has_key && s.n_bench === 0) $("#nokey").textContent = "La key se aceptó pero no llegó ningún benchmark: revisa la key o la terminal.";
   $("#cites").textContent = s.citations.join(" · ");
-  const tabs = Object.entries(s.tasks).map(([k, t]) => [k, t.name]).concat([["compare", "Comparar modelos"]]);
+  const tabs = [["rec", "★ Recomendación"]].concat(Object.entries(s.tasks).map(([k, t]) => [k, t.name]), [["compare", "Comparar modelos"]]);
   $("#tabs").innerHTML = tabs.map(([k, n]) => `<button data-t="${k}" class="${k === task ? "on" : ""}">${esc(n)}</button>`).join("");
   $("#tabs").querySelectorAll("button").forEach(b => b.onclick = () => show(b.dataset.t));
   api("/api/ids").then(ids => $("#ids").innerHTML = ids.map(i => `<option value="${esc(i)}">`).join(""));
@@ -235,8 +258,8 @@ function sessionHours() {
   return u.sessions && u.hours && u.days ? u.sessions * u.hours * u.days : null;
 }
 
-function controls() {
-  const t = S.tasks[task], p = prefs[task] || {};
+function controls(task_ = task) {
+  const task = task_, t = S.tasks[task], p = prefs[task] || {};
   return {task, tokens_in: p.tokens_in ?? t.tokens_in, tokens_out: p.tokens_out ?? t.tokens_out,
     cache_hit: p.cache_hit ?? t.cache_hit,
     min_context: p.min_context ?? t.min_context, min_coverage: p.min_coverage ?? 0.5, include_free: p.include_free ?? false,
@@ -248,10 +271,12 @@ function controls() {
 function show(t) {
   task = t;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
-  const isCmp = t === "compare";
-  $("#taskView").classList.toggle("hidden", isCmp);
+  const isCmp = t === "compare", isRec = t === "rec";
+  $("#taskView").classList.toggle("hidden", isCmp || isRec);
   $("#compareView").classList.toggle("hidden", !isCmp);
+  $("#recView").classList.toggle("hidden", !isRec);
   if (isCmp) return compare();
+  if (isRec) return recommend();
   const c = controls(), td = S.tasks[t];
   document.querySelectorAll(".unit").forEach(e => e.textContent = td.unit);
   document.querySelectorAll(".units").forEach(e => e.textContent = td.units);
@@ -509,6 +534,48 @@ async function providers(id) {
       <td>${p.latency_ms == null ? "–" : Math.round(p.latency_ms) + " ms"}</td><td>${p.throughput == null ? "–" : Math.round(p.throughput)}</td>
       <td>${p.tools ? "✓" : '<span class="neg">✗</span>'}</td></tr>`).join("") + "</tbody>";
 }
+
+let recSeq = 0;
+async function recommend() {
+  const seq = ++recSeq, out = $("#recOut");
+  $("#recBaseline").value = usage.baseline || "";
+  out.innerHTML = `<div class="panel muted">Calculando: descargando proveedores de OpenRouter (unos segundos la primera vez)…</div>`;
+  const tasks = Object.fromEntries(Object.keys(S.tasks).map(k => [k, controls(k)]));
+  let d;
+  try { d = await api("/api/recommend", {baseline: usage.baseline || null, tasks}); }
+  catch (e) { out.innerHTML = `<div class="banner">Error: ${esc(e.message)}</div>`; return; }
+  if (seq !== recSeq) return;
+  $("#negl").textContent = "$" + d.negligible;
+  const ROLE = {ahorro: "Ahorro", mejora: "Mejora", equilibrio: "Equilibrio", calidad: "Calidad"};
+  const m$ = v => v >= 100 ? "$" + int(v) : "$" + v.toFixed(2);
+  let now = 0, rec = 0, anyBase = false;
+  const html = d.tasks.map(t => {
+    const main = t.picks.find(p => p.role === t.main);
+    if (t.baseline) { now += t.baseline.monthly; anyBase = true; }
+    if (main) rec += main.monthly;
+    const pick = p => `<div class="pick ${p.role === t.main ? "main" : ""}">
+        <div class="role">${p.role === t.main ? "► Recomendado · " : ""}${ROLE[p.role]}</div>
+        <div class="id">${esc(p.id)}</div>
+        <div>${p.provider ? `vía <b>${esc(p.provider)}</b> <span class="muted">${esc(p.tag)}</span>` : '<span class="muted">precio de catálogo (sin datos de proveedores)</span>'}
+          ${p.quantization && p.quantization !== "unknown" ? `<span class="tag">${esc(p.quantization)}</span>` : ""}${p.tier ? `<span class="tag">${esc(p.tier)}</span>` : ""}</div>
+        <div class="nums">calidad <b>${p.quality.toFixed(1)}</b> · <b>${m$(p.monthly)}</b>/mes
+          ${t.baseline ? `<span class="${p.monthly <= t.baseline.monthly ? "pos" : "neg"}">(${p.monthly / t.baseline.monthly - 1 >= 0 ? "+" : ""}${Math.round((p.monthly / t.baseline.monthly - 1) * 100)}%)</span>` : ""}</div>
+        <div class="why">${esc(p.why)}</div>
+        ${p.tag ? `<div class="why">Fijar proveedor: <code>"provider": {"order": ["${esc(p.tag)}"]}</code> <button class="ghost copy" data-c='"provider": {"order": ["${esc(p.tag)}"]}'>copiar</button></div>` : ""}
+      </div>`;
+    return `<div class="panel"><div class="tablebar"><b>${esc(t.name)}</b>
+        <span class="muted">${int(t.per_month)} ${esc(t.units)}/mes${t.baseline ? ` · ahora: ${esc(t.baseline.id)}, calidad ${t.baseline.quality.toFixed(1)}, ${m$(t.baseline.monthly)}/mes` : ""}</span></div>
+      ${t.picks.length ? `<div class="recgrid">${t.picks.map(pick).join("")}</div>` : `<div class="banner">Sin recomendación: faltan benchmarks o proveedores fiables (¿has puesto la API key?).</div>`}</div>`;
+  }).join("");
+  out.innerHTML = (anyBase ? `<div class="panel total">Total: <b>${m$(now)}/mes</b> ahora → <b>${m$(rec)}/mes</b> con lo recomendado
+      <span class="${rec <= now ? "pos" : "neg"}">(${rec / now - 1 >= 0 ? "+" : ""}${Math.round((rec / now - 1) * 100)}%)</span></div>`
+    : `<div class="panel muted">Pon tu modelo actual arriba para ver cuánto ahorras frente a lo que usas hoy.</div>`) + html;
+  out.querySelectorAll("button.copy").forEach(b => b.onclick = async () => {
+    try { await navigator.clipboard.writeText(b.dataset.c); b.textContent = "copiado"; } catch (e) { b.textContent = "no se pudo copiar"; }
+  });
+}
+$("#recRun").onclick = () => { usage.baseline = $("#recBaseline").value.trim() || null; saveUsage(); recommend(); };
+$("#recBaseline").addEventListener("change", () => $("#recRun").click());
 
 let cmpTimer;
 async function compare() {

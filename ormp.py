@@ -12,6 +12,7 @@ import csv
 import getpass
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -383,6 +384,111 @@ def recommendations(rows: list[Row], limited: bool = False) -> list[tuple[str, R
     return out
 
 
+# ---------------------------------------------------------------- advisor
+NEGLIGIBLE_USD = 20.0  # a monthly cost under this is not worth trading quality for
+DEFAULT_PER_MONTH = {"coding": 176, "rewrite": 100, "papers": 100}  # 1 session x 8 h x 22 days
+
+
+def reliable(e: Endpoint, t: Task) -> bool:
+    """Provider good enough to recommend: uptime >= 99% over 24 h, not 4-bit, and with tool
+    calling when the task is coding (agents need it)."""
+    return ((e.uptime_1d or 0) >= 99 and not re.search(r"(fp|int)4", e.quantization or "")
+            and (t.key != "coding" or e.tools))
+
+
+@dataclass
+class Offer:
+    row: Row
+    endpoint: Endpoint | None  # cheapest reliable provider; None = catalog price (no data)
+    cost: float  # USD per unit with that provider
+
+
+def best_offer(row: Row, t: Task, endpoints_for) -> Offer | None:
+    try:
+        eps = [e for e in parse_endpoints(endpoints_for(row.model.id)) if reliable(e, t)]
+    except Exception:  # noqa: BLE001 - no provider data: fall back to the catalog price
+        return Offer(row, None, row.cost)
+    if not eps:
+        return None  # nobody serves it reliably: do not recommend it
+    e = min(eps, key=lambda e: e.model.cost(t))
+    return Offer(row, e, e.model.cost(t))
+
+
+@dataclass
+class Advice:
+    task: Task
+    per_month: float
+    baseline: Row | None
+    picks: list[tuple[str, Offer, str]]  # (role, offer, why)
+    main: str | None  # role of the recommended pick
+
+    def monthly(self, cost: float) -> float:
+        return cost * self.per_month
+
+
+def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None = None,
+           per_month: float | None = None, negligible: float = NEGLIGIBLE_USD,
+           min_coverage: float = 0.5) -> Advice:
+    """The recommendation algorithm, per task:
+    1. Rank models (benchmarks, coverage >= min_coverage, no :free) and price each one with
+       its cheapest reliable provider (see `reliable`).
+    2. Candidates: "ahorro" = your own model with that provider; "mejora" = the best model
+       that beats yours and costs less than you pay today; "calidad" = the cheapest model
+       reaching 90% of the best quality available; without a current model, "equilibrio" =
+       the cheapest one reaching 75%.
+    3. Pick: if "calidad" costs under `negligible` USD a month at your volume, quality wins
+       (saving cents is not worth worse answers); otherwise the saving on your own model,
+       then the upgrade, then the balance."""
+    per_month = per_month or DEFAULT_PER_MONTH.get(t.key, 100)
+    rows = rank(models, t, min_coverage)
+    offers = [o for o in (best_offer(r, t, endpoints_for) for r in rows) if o]
+    adv = Advice(t, per_month, baseline_row(models, t, baseline_id), [], None)
+    if not offers:
+        return adv
+    top = max(o.row.quality for o in offers)
+    front, best = [], -1.0
+    for o in sorted(offers, key=lambda o: (o.cost, -o.row.quality)):
+        if o.row.quality > best:
+            front.append(o)
+            best = o.row.quality
+
+    def cheapest_reaching(frac):
+        return next((o for o in front if o.row.quality >= frac * top), None)
+
+    b = adv.baseline
+    if b:
+        mine = best_offer(b, t, endpoints_for)
+        if mine and mine.endpoint and mine.cost < b.cost * 0.95:
+            adv.picks.append(("ahorro", mine, "Tu mismo modelo con el proveedor fiable más barato: mismos "
+                              f"resultados, {(1 - mine.cost / b.cost) * 100:.0f}% menos que el precio de catálogo."))
+        better = [o for o in offers if o.row.quality > b.quality and o.cost < b.cost and o.row.model.id != b.model.id]
+        if better:
+            up = max(better, key=lambda o: (o.row.quality, -o.cost))
+            adv.picks.append(("mejora", up, f"Mejor que tu modelo (+{up.row.quality - b.quality:.1f} de calidad) y "
+                              f"más barato que el precio de catálogo del tuyo ({(up.cost / b.cost - 1) * 100:+.0f}%)."))
+    else:
+        bal = cheapest_reaching(0.75)
+        if bal:
+            adv.picks.append(("equilibrio", bal, "El más barato con al menos el 75% de la mejor calidad disponible."))
+    q = cheapest_reaching(0.9)
+    if q:
+        adv.picks.append(("calidad", q, "El más barato con al menos el 90% de la mejor calidad disponible."))
+    # the same model and provider twice is one pick: keep the first role
+    seen, uniq = set(), []
+    for role, o, why in adv.picks:
+        k = (o.row.model.id, o.endpoint and o.endpoint.tag)
+        if k not in seen:
+            seen.add(k)
+            uniq.append((role, o, why))
+    adv.picks = uniq
+    roles = {r: o for r, o, _ in adv.picks}
+    if "calidad" in roles and adv.monthly(roles["calidad"].cost) <= negligible:
+        adv.main = "calidad"
+    else:
+        adv.main = next((r for r in ("ahorro", "mejora", "equilibrio", "calidad") if r in roles), None)
+    return adv
+
+
 # ---------------------------------------------------------------- output
 BOLD, DIM, GREEN, CYAN, YELLOW, RESET = ("\033[1m", "\033[2m", "\033[32m", "\033[36m", "\033[33m", "\033[0m") \
     if sys.stdout.isatty() and not os.environ.get("NO_COLOR") else ("",) * 6
@@ -445,6 +551,36 @@ def show_task(models, t: Task, opts) -> list[Row]:
     print(f"\n{BOLD}Frontera calidad/precio{RESET} (del más barato al mejor)")
     print_table(front, t, 50)
     return rows
+
+
+ROLE_LABEL = {"ahorro": "Ahorro", "mejora": "Mejora", "equilibrio": "Equilibrio", "calidad": "Calidad"}
+
+
+def print_advice(models, opts) -> None:
+    total_now = total_new = 0.0
+    for t in TASKS.values():
+        pm = opts.per_month if (opts.per_month and t.key == "coding") else None
+        adv = advise(models, t, fetch_endpoints, opts.baseline, pm)
+        print(f"\n{BOLD}{CYAN}== {t.name} =={RESET}  ({adv.per_month:,.0f} {t.units}/mes)")
+        if adv.baseline:
+            now = adv.monthly(adv.baseline.cost)
+            total_now += now
+            print(DIM + f"Ahora: {adv.baseline.model.id}, calidad {adv.baseline.quality:.1f}, ≈ ${now:,.2f}/mes "
+                  "(precio de catálogo)" + RESET)
+        if not adv.picks:
+            print(YELLOW + "  Sin recomendación: faltan benchmarks o proveedores fiables." + RESET)
+            continue
+        for role, o, why in adv.picks:
+            star = GREEN + "► RECOMENDADO " + RESET if role == adv.main else "  "
+            prov = f"{o.endpoint.provider} ({o.endpoint.tag})" if o.endpoint else "precio de catálogo"
+            print(f"  {star}{BOLD}{ROLE_LABEL[role]}:{RESET} {o.row.model.id} vía {prov}  "
+                  f"calidad {o.row.quality:.1f}, ≈ ${adv.monthly(o.cost):,.2f}/mes")
+            print(DIM + "      " + why + RESET)
+            if role == adv.main:
+                total_new += adv.monthly(o.cost)
+    if total_now:
+        print(f"\n{BOLD}Total:{RESET} ≈ ${total_now:,.2f}/mes ahora → ≈ ${total_new:,.2f}/mes con lo recomendado")
+    print(DIM + "Para fijar un proveedor en OpenRouter: \"provider\": {\"order\": [\"<variante>\"]}" + RESET)
 
 
 def compare(models: list[Model], query: str) -> None:
@@ -567,6 +703,8 @@ def main(argv=None) -> None:
     ap.add_argument("--max-in", type=float, help="precio máximo de entrada (USD por millón de tokens)")
     ap.add_argument("--max-out", type=float, help="precio máximo de salida (USD por millón de tokens)")
     ap.add_argument("--gui", action="store_true", help="abre la interfaz gráfica en el navegador")
+    ap.add_argument("--recommend", action="store_true",
+                    help="recomendación para todas las tareas (usa --baseline y --per-month para programar)")
     ap.add_argument("--port", type=int, default=8765, help="puerto de la GUI (0 = cualquiera libre)")
     opts = ap.parse_args(argv)
 
@@ -576,10 +714,13 @@ def main(argv=None) -> None:
         return
 
     key = os.environ.get("OPENROUTER_API_KEY")
-    if not key and sys.stdin.isatty() and not (opts.task or opts.compare or opts.csv):
+    if not key and sys.stdin.isatty() and not (opts.task or opts.compare or opts.csv or opts.recommend):
         key = getpass.getpass("OPENROUTER_API_KEY (Enter para seguir sin benchmarks): ").strip() or None
     models, citations = load(key, opts.refresh)
 
+    if opts.recommend:
+        print_advice(models, opts)
+        return
     if opts.task or opts.compare or opts.csv:
         if opts.task:
             show_task(models, TASKS[opts.task], opts)
