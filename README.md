@@ -17,8 +17,20 @@ Un solo fichero en Python, **sin dependencias** (solo la librería estándar, Py
 git clone https://github.com/amt911/openrouter-model-picker
 cd openrouter-model-picker
 export OPENROUTER_API_KEY=sk-or-...   # o pégala cuando la pida
-python3 ormp.py                       # menú interactivo
+python3 ormp.py --gui                 # interfaz gráfica en el navegador
+python3 ormp.py                       # menú interactivo en la terminal
 ```
+
+### Interfaz gráfica
+
+`python3 ormp.py --gui` abre la GUI en el navegador (servidor local en
+`127.0.0.1:8765`, solo accesible desde tu equipo; `--port 0` elige un puerto libre).
+
+- Una pestaña por tarea con la recomendación, un gráfico **calidad vs. coste** (la línea
+  verde es la frontera calidad/precio) y una tabla ordenable y filtrable.
+- Controles en vivo: tokens por tarea, contexto mínimo, cobertura mínima, incluir gratis.
+- Pestaña **Comparar modelos** para ver varios modelos lado a lado.
+- Puedes pegar la API key en la propia GUI; se queda solo en memoria.
 
 Sin menú:
 

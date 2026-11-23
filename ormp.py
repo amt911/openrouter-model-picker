@@ -419,7 +419,14 @@ def main(argv=None) -> None:
     ap.add_argument("--free", dest="include_free", action="store_true", help="incluye variantes :free")
     ap.add_argument("--min-coverage", type=float, default=0.5)
     ap.add_argument("--limit", type=int, default=15)
+    ap.add_argument("--gui", action="store_true", help="abre la interfaz gráfica en el navegador")
+    ap.add_argument("--port", type=int, default=8765, help="puerto de la GUI (0 = cualquiera libre)")
     opts = ap.parse_args(argv)
+
+    if opts.gui:
+        import gui
+        gui.run(os.environ.get("OPENROUTER_API_KEY"), opts.port)
+        return
 
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key and sys.stdin.isatty() and not (opts.task or opts.compare or opts.csv):
