@@ -763,7 +763,9 @@ async function busy(btn, fn) {
   try { setState(await fn()); } catch (e) { alert(e.message); } finally { btn.disabled = false; btn.textContent = old; }
 }
 $("#saveKey").onclick = () => busy($("#saveKey"), () => api("/api/key", {key: $("#key").value}));
-$("#key").onkeydown = e => e.key === "Enter" && $("#saveKey").click();
+// Block body on purpose: an on-handler that returns false cancels the key, and
+// `e.key === "Enter" && ...` returned false for every other key (typing, Ctrl+V).
+$("#key").addEventListener("keydown", e => { if (e.key === "Enter") $("#saveKey").click(); });
 $("#refresh").onclick = () => busy($("#refresh"), () => api("/api/key", {key: $("#key").value || undefined, refresh: true}));
 
 api("/api/state").then(setState).catch(e => $("#status").textContent = "error: " + e.message);
