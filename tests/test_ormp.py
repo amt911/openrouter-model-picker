@@ -250,7 +250,7 @@ class Watermark(unittest.TestCase):
         adv = ormp.advise(models, t, lambda mid: (_ for _ in ()).throw(OSError()), None, per_month=10,
                           exclude_authors=("a",))
         self.assertNotIn("a/big", [o.row.model.id for _, o, _ in adv.picks])
-        self.assertEqual(ormp.WATERMARK_AUTHORS, ("google", "openai", "anthropic"))
+        self.assertEqual(ormp.WATERMARK_AUTHORS, ("google", "openai", "anthropic", "x-ai"))
 
 
 class Advisor(unittest.TestCase):

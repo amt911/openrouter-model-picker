@@ -126,7 +126,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
         <label>Contexto mínimo <input id="ctx" type="number" min="0" step="8000"></label>
         <label>Cobertura mínima <span><input id="cov" type="range" min="0" max="1" step="0.05" value="0.5"> <b id="covv">50%</b></span></label>
         <label class="inline"><input id="free" type="checkbox"> Incluir gratis (:free, con límites)</label>
-        <label class="inline" id="wmBox" title="Google marca el texto de Gemini con SynthID-Text. OpenAI y Anthropic no han anunciado marcas de agua en texto, pero se quitan por precaución."><input id="noWm" type="checkbox"> Quitar modelos con posible marca de agua (SynthID de Google, y por precaución OpenAI y Anthropic)</label>
+        <label class="inline" id="wmBox" title="Google (SynthID-Text) y Anthropic marcan siempre el texto; OpenAI lo hace en ChatGPT en la UE y en la API si se activa; xAI en Grok 4.x. Meta marca las imágenes de Muse, pero no el texto."><input id="noWm" type="checkbox"> Quitar modelos con marca de agua en el texto (Google, Anthropic, OpenAI, xAI)</label>
         <button id="reset" class="ghost">Valores por defecto</button>
       </div>
       <div class="controls limits">
@@ -663,8 +663,8 @@ async function recommend() {
     const caps = [t.caps.max_in != null && `entrada ≤ $${t.caps.max_in}/M`, t.caps.max_out != null && `salida ≤ $${t.caps.max_out}/M`,
       t.caps.budget != null && `presupuesto ≤ $${t.caps.budget}/mes`,
       (t.excluded_authors || []).length && `sin ${t.excluded_authors.join(", ")}`].filter(Boolean);
-    const wm = t.task === "rewrite" ? `<label class="inline muted" title="Google marca el texto de Gemini con SynthID-Text; OpenAI y Anthropic se quitan por precaución">
-        <input type="checkbox" class="wmrec" ${usage.no_watermark ? "checked" : ""}> sin posible marca de agua (Google, OpenAI, Anthropic)</label>` : "";
+    const wm = t.task === "rewrite" ? `<label class="inline muted" title="Google y Anthropic marcan siempre el texto; OpenAI en la UE y en la API si se activa; xAI en Grok 4.x. Meta (Muse) no marca el texto.">
+        <input type="checkbox" class="wmrec" ${usage.no_watermark ? "checked" : ""}> sin marca de agua en texto (Google, Anthropic, OpenAI, xAI)</label>` : "";
     const capIn = (k, v, step) => `<input class="cap" data-task="${t.task}" data-k="${k}" type="number" min="0" step="${step}" placeholder="sin límite" value="${v ?? ""}">`;
     return `<div class="panel"><div class="tablebar"><b>${esc(t.name)}${caps.length ? ` <span class="tag">${esc(caps.join(" · "))}</span>` : ""}</b>
         <span class="controls capbox" title="max_price de OpenRouter para esta sección: ningún proveedor por encima de esto">

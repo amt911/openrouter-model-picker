@@ -285,10 +285,12 @@ def within_limits(m: Model, t: Task, max_cost: float | None = None, max_in: floa
             and (max_out is None or m.price_out * 1e6 <= max_out))
 
 
-# Authors whose models may watermark their text: Google ships SynthID-Text; OpenAI and
-# Anthropic have not announced text watermarks, but the user asked to exclude them too
-# ("potentially"). Applied only when requested (rewriting documents).
-WATERMARK_AUTHORS = ("google", "openai", "anthropic")
+# Authors whose models watermark (or can watermark) their text, as of November 2026:
+# Google (SynthID-Text on the Gemini API), Anthropic (model-level, derived from SynthID-Text,
+# no opt-out), OpenAI (textGrain: ChatGPT/Codex in the EU, opt-in on the API) and xAI (Grok
+# 4.x). Meta watermarks Muse images (Content Seal) but no text watermark is confirmed.
+# Applied only when requested (rewriting documents).
+WATERMARK_AUTHORS = ("google", "openai", "anthropic", "x-ai")
 
 
 def rank(models: list[Model], t: Task, min_coverage: float = 0.5, include_free: bool = False,
@@ -759,7 +761,7 @@ def main(argv=None) -> None:
     ap.add_argument("--max-cost", type=float, help="precio máximo por tarea (USD)")
     ap.add_argument("--baseline", help="tu modelo actual, p. ej. deepseek/deepseek-v4.1-flash-1017")
     ap.add_argument("--no-watermark", action="store_true",
-                    help="reescribir: excluye modelos con posible marca de agua (Google/SynthID, OpenAI, Anthropic)")
+                    help="reescribir: excluye modelos con marca de agua en texto (Google, Anthropic, OpenAI, xAI)")
     ap.add_argument("--per-month", type=float, help="tareas (u horas de sesión en coding) al mes")
     ap.add_argument("--max-in", type=float, help="precio máximo de entrada (USD por millón de tokens)")
     ap.add_argument("--max-out", type=float, help="precio máximo de salida (USD por millón de tokens)")

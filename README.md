@@ -40,8 +40,17 @@ tampoco los avatares que hablan ni los panoramas 360°.
 ### Marca de agua al reescribir
 
 En «Reescribir documentos» (y en su sección de la Recomendación) hay un check para quitar los
-modelos con posible marca de agua en el texto: Google (SynthID-Text) y, por precaución, OpenAI y
-Anthropic, que no han anunciado marcas en texto. En la terminal: `--no-watermark`.
+modelos cuyo texto lleva o puede llevar marca de agua (situación a noviembre de 2026):
+
+| Autor | Texto | Fuente |
+|---|---|---|
+| Google (Gemini) | SynthID-Text en la API | [Eden AI](https://www.edenai.co/post/ai-text-watermarking-llm-apis) |
+| Anthropic (Claude) | sí, a nivel de modelo y sin opción de quitarlo | [TechCrunch](https://techcrunch.com/2026/08/11/anthropic-says-it-will-watermark-text-generated-by-its-ai-models/) |
+| OpenAI | textGrain: ChatGPT/Codex en la UE; en la API solo si se activa | [TechCrunch](https://techcrunch.com/2026/10/05/openai-will-start-watermarking-chatgpts-text-in-the-eu/) |
+| xAI (Grok 4.x) | sí, desde el 7 de noviembre de 2026 | [Eden AI](https://www.edenai.co/post/ai-text-watermarking-llm-apis) |
+| Meta (Muse) | no confirmado: marca las **imágenes** de Muse Image (Content Seal), no el texto | [AI Chat Daily](https://www.aichatdaily.com/ai-security/meta-launches-content-seal-ai-watermarking-three-years) |
+
+En la terminal: `--no-watermark`.
 
 ### Recomendación automática
 
