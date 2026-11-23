@@ -161,7 +161,8 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const usd = x => x === 0 ? "gratis" : x < 0.01 ? "$" + x.toFixed(5) : x < 1 ? "$" + x.toFixed(4) : "$" + x.toFixed(2);
-const pm = x => x.toFixed(2);
+// Per-million prices: enough decimals that cheap cache prices (e.g. 0.0036) never show as 0.00.
+const pm = x => x === 0 ? "0" : x < 0.01 ? x.toFixed(4) : x < 1 ? x.toFixed(3) : x.toFixed(2);
 const kctx = n => n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M" : Math.round(n / 1000) + "k";
 const SHORT = {aa_intelligence:"AA int", aa_multilingual:"AA multi", aa_healthcare:"AA salud", aa_engineering:"AA ing",
   aa_legal:"AA legal", da_coding_elo:"DA ELO", or_tau_bench:"tau", or_gpqa:"GPQA", or_search:"search"};
@@ -177,7 +178,8 @@ const saveLimits = () => { try { localStorage.setItem(LS, JSON.stringify(limits)
 const saveUsage = () => { try { localStorage.setItem(LU, JSON.stringify(usage)); } catch (e) {} };
 const num = v => v === "" || v == null || isNaN(+v) ? null : +v;
 const per = (obj, k) => (obj || {})[k] ?? null;
-const int = n => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+// Thousands grouped with a narrow space: "$8.964" was read as 8.96 dollars, "$8 964" is unambiguous.
+const int = n => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, "\u202f");
 const SESSION_DEFAULTS = {sessions: 5, hours: 20, days: 30};
 
 async function api(path, body) {
