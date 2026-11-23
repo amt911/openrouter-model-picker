@@ -55,25 +55,30 @@ class Task:
     tokens_out: int
     min_context: int
     note: str
+    unit: str = "tarea"  # what tokens_in/tokens_out describe
+    units: str = "tareas"  # plural, for "N units per month"
+    cache_hit: float = 0.0  # share of input tokens served from the prompt cache
 
 
 TASKS = {
     "coding": Task(
         "coding", "Programar",
         {"da_coding_elo": 0.45, "aa_intelligence": 0.35, "or_tau_bench": 0.20},
-        tokens_in=20_000, tokens_out=3_000, min_context=64_000,
-        note="Agentes de código leen mucho contexto y escriben poco: el precio de entrada pesa.",
+        tokens_in=4_000_000, tokens_out=50_000, min_context=64_000,
+        unit="hora de sesión", units="horas de sesión", cache_hit=0.9,
+        note="Una hora de un agente de código: relee el contexto en cada paso (muchísima entrada, casi "
+             "toda cacheada) y escribe poco. Estimación: calíbrala con tu gasto real.",
     ),
     "rewrite": Task(
         "rewrite", "Reescribir documentos",
         {"aa_intelligence": 0.45, "aa_multilingual": 0.40, "aa_legal": 0.15},
-        tokens_in=6_000, tokens_out=6_000, min_context=32_000,
+        tokens_in=6_000, tokens_out=6_000, min_context=32_000, unit="documento", units="documentos",
         note="No hay benchmark directo de redacción: se usa inteligencia + multilingüe (español) + legal (precisión de texto).",
     ),
     "papers": Task(
         "papers", "Cotejar papers",
         {"aa_intelligence": 0.30, "or_gpqa": 0.25, "or_search": 0.20, "aa_healthcare": 0.15, "aa_engineering": 0.10},
-        tokens_in=80_000, tokens_out=2_500, min_context=128_000,
+        tokens_in=80_000, tokens_out=2_500, min_context=128_000, unit="consulta", units="consultas",
         note="Varios papers por consulta: contexto mínimo 128k y razonamiento científico (GPQA).",
     ),
 }
@@ -111,13 +116,49 @@ class Model:
     context: int
     metrics: dict[str, float] = field(default_factory=dict)  # raw values
     pct: dict[str, float] = field(default_factory=dict)  # percentiles in pool
+    price_cache: float | None = None  # USD per cached input token; None = no caching listed
+    variable_price: bool = False  # price depends on the time of day (OpenRouter "overrides")
 
     @property
     def free(self) -> bool:
         return self.price_in == 0 and self.price_out == 0
 
     def cost(self, t: Task) -> float:
-        return self.price_in * t.tokens_in + self.price_out * t.tokens_out
+        """USD per task unit. Cached input is billed at the cache-read price when the model
+        lists one; models without caching pay full input price for every token."""
+        cached = t.tokens_in * t.cache_hit if self.price_cache is not None else 0
+        return (self.price_in * (t.tokens_in - cached) + (self.price_cache or 0) * cached
+                + self.price_out * t.tokens_out)
+
+
+def _hhmm(v: int) -> int:
+    return (v // 100) * 60 + v % 100
+
+
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def weekly_avg_prices(p: dict) -> dict[str, float]:
+    """Average of each price over a week of round-the-clock use, applying the time-of-day
+    "overrides" (utc_days + utc_start/utc_end as HHMM, end 0 = midnight; first match wins)."""
+    keys = ("prompt", "completion", "input_cache_read")
+    base = {k: float(p[k]) for k in keys if k in p}
+    ovs = p.get("overrides") or []
+    if not ovs:
+        return base
+    total = {k: 0.0 for k in base}
+    for d, day in enumerate(WEEKDAYS):
+        spans = []
+        for o in ovs:
+            if day in (o.get("utc_days") or WEEKDAYS):
+                a = _hhmm(o.get("utc_start", 0))
+                b = _hhmm(o.get("utc_end", 0)) or 1440
+                spans.append((a, b, o))
+        for minute in range(1440):
+            o = next((o for a, b, o in spans if a <= minute < b), None)
+            for k in total:
+                total[k] += float(o[k]) if o and k in o else base[k]
+    return {k: v / (7 * 1440) for k, v in total.items()}
 
 
 def parse_catalog(raw: dict) -> tuple[list[Model], dict[str, Model]]:
@@ -126,15 +167,17 @@ def parse_catalog(raw: dict) -> tuple[list[Model], dict[str, Model]]:
     for m in raw.get("data", []):
         p = m.get("pricing") or {}
         try:
-            pin, pout = float(p.get("prompt", "x")), float(p.get("completion", "x"))
-        except ValueError:
+            avg = weekly_avg_prices(p)
+            pin, pout = avg["prompt"], avg["completion"]
+        except (KeyError, ValueError, TypeError):
             continue
         if pin < 0 or pout < 0:  # routers such as openrouter/auto report -1
             continue
         outs = (m.get("architecture") or {}).get("output_modalities") or ["text"]
         if "text" not in outs:
             continue
-        mod = Model(m["id"], m.get("name", m["id"]), pin, pout, int(m.get("context_length") or 0))
+        mod = Model(m["id"], m.get("name", m["id"]), pin, pout, int(m.get("context_length") or 0),
+                    price_cache=avg.get("input_cache_read"), variable_price=bool(p.get("overrides")))
         models.append(mod)
         for slug in (m["id"], m.get("canonical_slug")):
             if slug:
@@ -266,6 +309,25 @@ def pareto(rows: list[Row]) -> list[Row]:
     return front
 
 
+def baseline_row(models: list[Model], t: Task, model_id: str | None) -> Row | None:
+    """Score the user's current model on the same scale, ignoring every filter."""
+    m = next((m for m in models if m.id == model_id), None) if model_id else None
+    rows = rank([m], t, 0.0, True, 0) if m else []
+    return rows[0] if rows else None
+
+
+def vs_baseline(rows: list[Row], base: Row) -> list[tuple[str, Row]]:
+    """Answers "is there something better and cheaper than what I use?"."""
+    out = []
+    better = [r for r in rows if r.quality > base.quality and r.cost < base.cost and r.model.id != base.model.id]
+    if better:
+        out.append((f"Mejor y más barato que {base.model.id}", max(better, key=lambda r: r.quality)))
+    similar = [r for r in rows if r.quality >= base.quality - 5 and r.cost < base.cost and r.model.id != base.model.id]
+    if similar:
+        out.append((f"Calidad parecida (±5) y lo más barato posible", min(similar, key=lambda r: r.cost)))
+    return out
+
+
 def recommendations(rows: list[Row], limited: bool = False) -> list[tuple[str, Row]]:
     if not rows:
         return []
@@ -312,8 +374,8 @@ def show_task(models, t: Task, opts) -> list[Row]:
                 max_cost=opts.max_cost, max_in=opts.max_in, max_out=opts.max_out)
     limited = any(x is not None for x in (opts.max_cost, opts.max_in, opts.max_out))
     front = pareto(rows)
-    print(f"\n{BOLD}{CYAN}== {t.name} =={RESET}  perfil: {t.tokens_in:,} tokens entrada + {t.tokens_out:,} salida "
-          f"por tarea, contexto ≥ {t.min_context // 1000}k")
+    print(f"\n{BOLD}{CYAN}== {t.name} =={RESET}  perfil por {t.unit}: {t.tokens_in:,} tokens entrada "
+          f"({t.cache_hit:.0%} cacheada) + {t.tokens_out:,} salida, contexto ≥ {t.min_context // 1000}k")
     print(DIM + t.note + RESET)
     print(DIM + "Pesos: " + ", ".join(f"{METRICS[k]} {w:.0%}" for k, w in t.weights.items()) + RESET)
     print(f"\n{BOLD}Recomendación{RESET}")
@@ -321,8 +383,22 @@ def show_task(models, t: Task, opts) -> list[Row]:
         print(YELLOW + "Límites de precio: " + ", ".join(
             f"{n} ≤ {v}" for n, v in (("$/tarea", opts.max_cost), ("$in/M", opts.max_in), ("$out/M", opts.max_out))
             if v is not None) + RESET)
+    per_month = getattr(opts, "per_month", None)
+    def money(r):
+        return f"{usd(r.cost)}/{t.unit}" + (f", ≈ ${r.cost * per_month:,.0f}/mes" if per_month else "")
     for label, r in recommendations(rows, limited):
-        print(f"  {GREEN}{label}:{RESET} {r.model.id}  (calidad {r.quality:.1f}, {usd(r.cost)}/tarea)")
+        print(f"  {GREEN}{label}:{RESET} {r.model.id}  (calidad {r.quality:.1f}, {money(r)})")
+    base = baseline_row(models, t, getattr(opts, "baseline", None))
+    if getattr(opts, "baseline", None) and not base:
+        print(YELLOW + f"  No encuentro {opts.baseline} con benchmarks para esta tarea." + RESET)
+    if base:
+        print(f"\n{BOLD}Frente a tu modelo actual{RESET}: {base.model.id} (calidad {base.quality:.1f}, {money(base)})")
+        found = vs_baseline(rows, base)
+        for label, r in found:
+            delta = f", {(r.cost / base.cost - 1) * 100:+.0f}% coste" if base.cost else ""
+            print(f"  {GREEN}{label}:{RESET} {r.model.id}  (calidad {r.quality:.1f}, {money(r)}{delta})")
+        if not found:
+            print(YELLOW + "  Ningún modelo es mejor y más barato a la vez: tu modelo ya está en la frontera." + RESET)
     print(f"\n{BOLD}Top {opts.limit} por calidad{RESET}  (★ = frontera calidad/precio: nadie es mejor y más barato)")
     print_table(rows, t, opts.limit, {r.model.id for r in front})
     print(f"\n{BOLD}Frontera calidad/precio{RESET} (del más barato al mejor)")
@@ -445,6 +521,8 @@ def main(argv=None) -> None:
     ap.add_argument("--min-coverage", type=float, default=0.5)
     ap.add_argument("--limit", type=int, default=15)
     ap.add_argument("--max-cost", type=float, help="precio máximo por tarea (USD)")
+    ap.add_argument("--baseline", help="tu modelo actual, p. ej. deepseek/deepseek-v4.1-flash-1017")
+    ap.add_argument("--per-month", type=float, help="tareas (u horas de sesión en coding) al mes")
     ap.add_argument("--max-in", type=float, help="precio máximo de entrada (USD por millón de tokens)")
     ap.add_argument("--max-out", type=float, help="precio máximo de salida (USD por millón de tokens)")
     ap.add_argument("--gui", action="store_true", help="abre la interfaz gráfica en el navegador")

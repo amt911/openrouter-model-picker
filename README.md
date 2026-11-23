@@ -29,7 +29,12 @@ python3 ormp.py                       # menú interactivo en la terminal
 - Una pestaña por tarea con la recomendación, un gráfico **calidad vs. coste** (la línea
   verde es la frontera calidad/precio) y una tabla ordenable y filtrable.
 - Controles en vivo: tokens por tarea, contexto mínimo, cobertura mínima, incluir gratis.
-- **Límites de precio**: máximo $ por tarea (por pestaña), máximo $ de entrada y de salida
+- **Tu uso**: tu modelo actual (para ver qué es mejor *y* más barato que él), sesiones en
+  paralelo × horas/día × días/mes en «Programar» (tareas al mes en el resto) y, opcional, lo
+  que pagas hoy al mes: con eso el volumen se calibra a tu factura real y todos los costes
+  pasan a $/mes. En el gráfico tu modelo sale en naranja y la zona verde de arriba a la
+  izquierda es "mejor y más barato".
+- **Límites de precio**: presupuesto máximo al mes, máximo $ por tarea (por pestaña), máximo $ de entrada y de salida
   por millón de tokens (para todas las pestañas) y tareas al mes para ver el gasto
   mensual estimado. Se recuerdan entre sesiones y la línea naranja del gráfico marca tu
   límite. Las recomendaciones pasan a ser "lo mejor dentro de tu presupuesto".
@@ -42,6 +47,7 @@ Sin menú:
 python3 ormp.py coding                # también: rewrite, papers
 python3 ormp.py papers --free         # incluye variantes :free (con límites de uso)
 python3 ormp.py coding --max-cost 0.03 --max-out 5   # límites: $/tarea y $/M tokens de salida
+python3 ormp.py coding --baseline deepseek/deepseek-v4.1-flash-1017 --per-month 3000   # vs. tu modelo, $/mes
 python3 ormp.py --compare "claude,gpt-5,deepseek"
 python3 ormp.py --csv modelos.csv
 python3 ormp.py coding --refresh      # ignora la caché de 12 h
@@ -61,10 +67,13 @@ benchmarks, porque `/api/v1/benchmarks` exige autenticación.
 
   | Tarea | Métricas (peso) | Perfil de coste por tarea | Contexto mín. |
   |---|---|---|---|
-  | Programar | Design Arena coding ELO 45%, AA Intelligence 35%, tau-bench 20% | 20k entrada + 3k salida | 64k |
+  | Programar | Design Arena coding ELO 45%, AA Intelligence 35%, tau-bench 20% | 1 hora de sesión de agente: 4M entrada (90% cacheada) + 50k salida | 64k |
   | Reescribir | AA Intelligence 45%, AA Multilingual 40%, AA Legal 15% | 6k + 6k | 32k |
   | Papers | AA Intelligence 30%, GPQA Diamond 25%, Search evals 20%, AA Healthcare 15%, AA Engineering 10% | 80k + 2.5k | 128k |
 
+- **Coste realista**: la entrada cacheada se cobra al precio de caché del modelo (los
+  modelos sin caché pagan toda la entrada), y los modelos con precio por horario (⏱) usan
+  la media de una semana de uso continuo.
 - **Cobertura**: qué parte del peso tiene datos para ese modelo. Por defecto se exige
   ≥ 50% para que un modelo con una sola métrica no salga primero por casualidad.
 - **Recomendación**: mejor calidad, y el modelo más barato que llega al 90% y al 75% de

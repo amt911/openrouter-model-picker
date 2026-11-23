@@ -165,6 +165,65 @@ class PriceLimits(unittest.TestCase):
         self.assertEqual(r.model.id, "b/mid")
 
 
+class CacheAndTimeOfDay(unittest.TestCase):
+    def test_cache_read_price_applies_to_cached_share(self):
+        m = ormp.Model("x", "x", 1e-6, 2e-6, 0, price_cache=1e-7)
+        t = ormp.Task("k", "k", {}, tokens_in=1000, tokens_out=100, min_context=0, note="", cache_hit=0.9)
+        self.assertAlmostEqual(m.cost(t), 100 * 1e-6 + 900 * 1e-7 + 100 * 2e-6)
+
+    def test_no_cache_price_pays_full_input(self):
+        m = ormp.Model("x", "x", 1e-6, 0, 0)
+        t = ormp.Task("k", "k", {}, tokens_in=1000, tokens_out=0, min_context=0, note="", cache_hit=0.9)
+        self.assertAlmostEqual(m.cost(t), 1000 * 1e-6)
+
+    def test_weekly_average_with_overrides(self):
+        # weekdays 01:00-04:00 at double price: 5 days * 3 h out of 168 h
+        p = {"prompt": "1", "completion": "2", "overrides": [
+            {"utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"], "utc_start": 100, "utc_end": 400,
+             "prompt": "2", "completion": "4"}]}
+        avg = ormp.weekly_avg_prices(p)
+        self.assertAlmostEqual(avg["prompt"], 1 + 15 / 168)
+        self.assertAlmostEqual(avg["completion"], 2 * (1 + 15 / 168))
+
+    def test_override_end_zero_means_midnight(self):
+        p = {"prompt": "1", "completion": "1", "overrides": [{"utc_start": 2200, "utc_end": 0, "prompt": "3", "completion": "1"}]}
+        self.assertAlmostEqual(ormp.weekly_avg_prices(p)["prompt"], 1 + 2 * 2 / 24)
+
+    def test_catalog_marks_variable_price(self):
+        raw = {"data": [{"id": "v/x", "context_length": 1, "pricing": {"prompt": "0.000001", "completion": "0.000001",
+                         "input_cache_read": "0.0000001", "overrides": [{"utc_start": 0, "utc_end": 1200, "prompt": "0.000003"}]}}]}
+        m = ormp.parse_catalog(raw)[0][0]
+        self.assertTrue(m.variable_price)
+        self.assertAlmostEqual(m.price_in, 2e-6)
+        self.assertAlmostEqual(m.price_cache, 1e-7)
+
+
+class Baseline(unittest.TestCase):
+    def setUp(self):
+        self.m, _ = build()
+        self.models = list(self.m.values())
+        self.t = ormp.TASKS["rewrite"]
+
+    def test_baseline_scored_even_if_filtered(self):
+        b = ormp.baseline_row(self.models, self.t, "d/tiny-ctx")  # below min context, no benchmarks
+        self.assertIsNone(b)
+        b = ormp.baseline_row(self.models, self.t, "b/mid")
+        self.assertEqual(b.model.id, "b/mid")
+
+    def test_better_and_cheaper(self):
+        rows = ormp.rank(self.models, self.t)
+        # a/big is better but pricier than b/mid; c/cheap cheaper but much worse
+        self.assertEqual(ormp.vs_baseline(rows, ormp.baseline_row(self.models, self.t, "b/mid")), [])
+        found = dict(ormp.vs_baseline(rows, ormp.baseline_row(self.models, self.t, "c/cheap")))
+        self.assertEqual(found, {})
+        # make a/big cheaper than b/mid
+        self.m["a/big"].price_out = self.m["a/big"].price_in = 1e-9
+        rows = ormp.rank(self.models, self.t)
+        label, r = ormp.vs_baseline(rows, ormp.baseline_row(self.models, self.t, "b/mid"))[0]
+        self.assertEqual(r.model.id, "a/big")
+        self.assertIn("Mejor y más barato", label)
+
+
 class EndToEnd(unittest.TestCase):
     def test_show_task_prints_recommendation(self):
         import io, contextlib, argparse

@@ -40,7 +40,8 @@ class State:
             "citations": self.citations,
             "metrics": ormp.METRICS,
             "tasks": {k: {"name": t.name, "weights": t.weights, "tokens_in": t.tokens_in,
-                          "tokens_out": t.tokens_out, "min_context": t.min_context, "note": t.note}
+                          "tokens_out": t.tokens_out, "min_context": t.min_context, "note": t.note,
+                          "unit": t.unit, "units": t.units, "cache_hit": t.cache_hit}
                       for k, t in ormp.TASKS.items()},
         }
 
@@ -48,6 +49,7 @@ class State:
 def model_json(m: ormp.Model) -> dict:
     return {"id": m.id, "name": m.name, "price_in": m.price_in * 1e6, "price_out": m.price_out * 1e6,
             "context": m.context, "free": m.free, "metrics": m.metrics,
+            "price_cache": None if m.price_cache is None else m.price_cache * 1e6, "variable_price": m.variable_price,
             "cost": {k: m.cost(t) for k, t in ormp.TASKS.items()}}
 
 
@@ -56,14 +58,36 @@ def rank_json(state: State, body: dict) -> dict:
     # Per-request copy: GUI tweaks never change the defaults shared with other requests.
     t = dataclasses.replace(base, tokens_in=int(body.get("tokens_in", base.tokens_in)),
                             tokens_out=int(body.get("tokens_out", base.tokens_out)),
-                            min_context=int(body.get("min_context", base.min_context)))
-    caps = {k: (float(body[k]) if body.get(k) not in (None, "") else None)
-            for k in ("max_cost", "max_in", "max_out")}
+                            min_context=int(body.get("min_context", base.min_context)),
+                            cache_hit=min(1.0, max(0.0, float(body.get("cache_hit", base.cache_hit)))))
+    def opt(k):
+        v = body.get(k)
+        return float(v) if v not in (None, "") else None
+
+    caps = {k: opt(k) for k in ("max_cost", "max_in", "max_out")}
+    b = ormp.baseline_row(state.models, t, body.get("baseline") or None)
+    # Units per month: calibrated from the real monthly bill of the current model when
+    # given (spend / that model's cost per unit), else what the user typed.
+    per_month, spend = opt("per_month"), opt("spend")
+    calibrated = bool(b and spend and b.cost > 0)
+    if calibrated:
+        per_month = spend / b.cost
+    budget = opt("budget")
+    if budget is not None and per_month:
+        per_unit = budget / per_month
+        caps["max_cost"] = per_unit if caps["max_cost"] is None else min(caps["max_cost"], per_unit)
     rows = ormp.rank(state.models, t, float(body.get("min_coverage", 0.5)), bool(body.get("include_free")), **caps)
     front = {r.model.id for r in ormp.pareto(rows)}
+
+    def row_json(r):
+        return {**model_json(r.model), "quality": r.quality, "coverage": r.coverage, "task_cost": r.cost}
+
     return {
-        "rows": [{**model_json(r.model), "quality": r.quality, "coverage": r.coverage, "task_cost": r.cost,
-                  "pareto": r.model.id in front} for r in rows],
+        "per_month": per_month, "calibrated": calibrated, "max_cost_effective": caps["max_cost"],
+        "baseline": b and row_json(b),
+        "vs_baseline": [{"label": label, "id": r.model.id, "quality": r.quality, "cost": r.cost}
+                        for label, r in (ormp.vs_baseline(rows, b) if b else [])],
+        "rows": [{**row_json(r), "pareto": r.model.id in front} for r in rows],
         "recs": [{"label": label, "id": r.model.id, "quality": r.quality, "cost": r.cost}
                  for label, r in ormp.recommendations(rows, any(v is not None for v in caps.values()))],
     }
@@ -104,6 +128,8 @@ def make_handler(state: State, port: int):
             u = urlparse(self.path)
             if u.path == "/":
                 self._send(200, HTML.read_bytes(), "text/html; charset=utf-8")
+            elif u.path == "/api/ids":
+                self._json(sorted(m.id for m in state.models))
             elif u.path == "/api/state":
                 self._json(state.summary())
             elif u.path == "/api/models":

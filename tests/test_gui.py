@@ -60,6 +60,24 @@ class GuiApi(unittest.TestCase):
         self.assertEqual([r["id"] for r in d["rows"]], ["b/mid", "c/cheap"])
         self.assertIn("límite", d["recs"][0]["label"])
 
+    def test_calibration_and_budget(self):
+        b = self.state.models
+        st, body = self.req("POST", "/api/rank", {"task": "rewrite", "baseline": "b/mid", "spend": "100"})
+        d = json.loads(body)
+        self.assertTrue(d["calibrated"])
+        self.assertAlmostEqual(d["per_month"] * d["baseline"]["task_cost"], 100)
+        # budget equal to the baseline's monthly spend keeps b/mid and drops the pricier a/big
+        st, body = self.req("POST", "/api/rank", {"task": "rewrite", "baseline": "b/mid", "spend": 100, "budget": 100})
+        ids = [r["id"] for r in json.loads(body)["rows"]]
+        self.assertNotIn("a/big", ids)
+        self.assertIn("b/mid", ids)
+
+    def test_per_month_without_baseline(self):
+        st, body = self.req("POST", "/api/rank", {"task": "rewrite", "per_month": 10, "budget": 0.0001})
+        d = json.loads(body)
+        self.assertFalse(d["calibrated"])
+        self.assertAlmostEqual(d["max_cost_effective"], 0.00001)
+
     def test_compare(self):
         st, body = self.req("GET", "/api/models?q=big")
         self.assertEqual({m["id"] for m in json.loads(body)}, {"a/big", "a/big:free", "a/big:batch"})
