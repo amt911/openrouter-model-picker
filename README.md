@@ -29,6 +29,10 @@ python3 ormp.py                       # menú interactivo en la terminal
 - Una pestaña por tarea con la recomendación, un gráfico **calidad vs. coste** (la línea
   verde es la frontera calidad/precio) y una tabla ordenable y filtrable.
 - Controles en vivo: tokens por tarea, contexto mínimo, cobertura mínima, incluir gratis.
+- **Límites de precio**: máximo $ por tarea (por pestaña), máximo $ de entrada y de salida
+  por millón de tokens (para todas las pestañas) y tareas al mes para ver el gasto
+  mensual estimado. Se recuerdan entre sesiones y la línea naranja del gráfico marca tu
+  límite. Las recomendaciones pasan a ser "lo mejor dentro de tu presupuesto".
 - Pestaña **Comparar modelos** para ver varios modelos lado a lado.
 - Puedes pegar la API key en la propia GUI; se queda solo en memoria.
 
@@ -37,6 +41,7 @@ Sin menú:
 ```bash
 python3 ormp.py coding                # también: rewrite, papers
 python3 ormp.py papers --free         # incluye variantes :free (con límites de uso)
+python3 ormp.py coding --max-cost 0.03 --max-out 5   # límites: $/tarea y $/M tokens de salida
 python3 ormp.py --compare "claude,gpt-5,deepseek"
 python3 ormp.py --csv modelos.csv
 python3 ormp.py coding --refresh      # ignora la caché de 12 h

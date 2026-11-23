@@ -224,15 +224,28 @@ class Row:
     cost: float
 
 
+def within_limits(m: Model, t: Task, max_cost: float | None = None, max_in: float | None = None,
+                  max_out: float | None = None) -> bool:
+    """Price caps: max_cost in USD per task, max_in/max_out in USD per million tokens.
+    None means no cap."""
+    return ((max_cost is None or m.cost(t) <= max_cost)
+            and (max_in is None or m.price_in * 1e6 <= max_in)
+            and (max_out is None or m.price_out * 1e6 <= max_out))
+
+
 def rank(models: list[Model], t: Task, min_coverage: float = 0.5, include_free: bool = False,
-         min_context: int | None = None) -> list[Row]:
+         min_context: int | None = None, max_cost: float | None = None, max_in: float | None = None,
+         max_out: float | None = None) -> list[Row]:
     """Score each model for the task. quality = weighted mean of the percentiles it has;
-    coverage = share of the task's weight it has data for."""
+    coverage = share of the task's weight it has data for. Percentiles are computed over
+    the whole catalog, so price caps remove models without changing anyone's score."""
     min_ctx = t.min_context if min_context is None else min_context
     rows = []
     for m in models:
         if m.context < min_ctx or (m.free and not include_free) or m.id.endswith(":batch"):
             continue  # :batch = asynchronous batch API, not usable interactively
+        if not within_limits(m, t, max_cost, max_in, max_out):
+            continue
         avail = {k: w for k, w in t.weights.items() if k in m.pct}
         cov = sum(avail.values()) / sum(t.weights.values())
         if not avail or cov < min_coverage:
@@ -253,11 +266,11 @@ def pareto(rows: list[Row]) -> list[Row]:
     return front
 
 
-def recommendations(rows: list[Row]) -> list[tuple[str, Row]]:
+def recommendations(rows: list[Row], limited: bool = False) -> list[tuple[str, Row]]:
     if not rows:
         return []
     top = rows[0]
-    out = [("Mejor calidad", top)]
+    out = [("Mejor calidad dentro de tu límite de precio" if limited else "Mejor calidad", top)]
     front = pareto(rows)
     for frac, label in ((0.9, "Más barato con ≥90% de la calidad máxima"),
                         (0.75, "Más barato con ≥75% de la calidad máxima")):
@@ -295,14 +308,20 @@ def print_table(rows: list[Row], t: Task, limit: int, mark: set[str] = frozenset
 
 
 def show_task(models, t: Task, opts) -> list[Row]:
-    rows = rank(models, t, opts.min_coverage, opts.include_free)
+    rows = rank(models, t, opts.min_coverage, opts.include_free,
+                max_cost=opts.max_cost, max_in=opts.max_in, max_out=opts.max_out)
+    limited = any(x is not None for x in (opts.max_cost, opts.max_in, opts.max_out))
     front = pareto(rows)
     print(f"\n{BOLD}{CYAN}== {t.name} =={RESET}  perfil: {t.tokens_in:,} tokens entrada + {t.tokens_out:,} salida "
           f"por tarea, contexto ≥ {t.min_context // 1000}k")
     print(DIM + t.note + RESET)
     print(DIM + "Pesos: " + ", ".join(f"{METRICS[k]} {w:.0%}" for k, w in t.weights.items()) + RESET)
     print(f"\n{BOLD}Recomendación{RESET}")
-    for label, r in recommendations(rows):
+    if limited:
+        print(YELLOW + "Límites de precio: " + ", ".join(
+            f"{n} ≤ {v}" for n, v in (("$/tarea", opts.max_cost), ("$in/M", opts.max_in), ("$out/M", opts.max_out))
+            if v is not None) + RESET)
+    for label, r in recommendations(rows, limited):
         print(f"  {GREEN}{label}:{RESET} {r.model.id}  (calidad {r.quality:.1f}, {usd(r.cost)}/tarea)")
     print(f"\n{BOLD}Top {opts.limit} por calidad{RESET}  (★ = frontera calidad/precio: nadie es mejor y más barato)")
     print_table(rows, t, opts.limit, {r.model.id for r in front})
@@ -384,6 +403,12 @@ def edit_profile(opts) -> None:
     opts.min_coverage = float(ask("Cobertura mínima de benchmarks 0-1", str(opts.min_coverage)))
     opts.include_free = ask("Incluir variantes gratis (con límites de uso)? s/n", "s" if opts.include_free else "n") == "s"
     opts.limit = int(ask("Filas a mostrar", str(opts.limit)))
+    def cap(prompt, cur):
+        v = ask(prompt + " (vacío = sin límite)", "" if cur is None else str(cur))
+        return float(v) if v else None
+    opts.max_cost = cap("Precio máximo por tarea en USD", opts.max_cost)
+    opts.max_in = cap("Precio máximo de entrada, USD por millón de tokens", opts.max_in)
+    opts.max_out = cap("Precio máximo de salida, USD por millón de tokens", opts.max_out)
 
 
 def menu(models, citations, opts) -> None:
@@ -392,7 +417,7 @@ def menu(models, citations, opts) -> None:
         for i, t in enumerate(TASKS.values(), 1):
             print(f"  {i}) {t.name}")
         print("  4) Comparar modelos concretos (ej: claude, gpt-5, deepseek)")
-        print("  5) Ajustar perfil / filtros")
+        print("  5) Ajustar perfil / filtros / límites de precio")
         print("  6) Exportar todo a CSV")
         print("  q) Salir")
         c = ask(">")
@@ -419,6 +444,9 @@ def main(argv=None) -> None:
     ap.add_argument("--free", dest="include_free", action="store_true", help="incluye variantes :free")
     ap.add_argument("--min-coverage", type=float, default=0.5)
     ap.add_argument("--limit", type=int, default=15)
+    ap.add_argument("--max-cost", type=float, help="precio máximo por tarea (USD)")
+    ap.add_argument("--max-in", type=float, help="precio máximo de entrada (USD por millón de tokens)")
+    ap.add_argument("--max-out", type=float, help="precio máximo de salida (USD por millón de tokens)")
     ap.add_argument("--gui", action="store_true", help="abre la interfaz gráfica en el navegador")
     ap.add_argument("--port", type=int, default=8765, help="puerto de la GUI (0 = cualquiera libre)")
     opts = ap.parse_args(argv)

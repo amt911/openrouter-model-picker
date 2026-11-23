@@ -43,6 +43,10 @@ nav button.on { color: var(--text); border-bottom-color: var(--accent); font-wei
 .controls label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
 .controls label.inline { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
 .note { color: var(--muted); margin: 10px 0 0; }
+.limits { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.lim-title { align-self: center; font-size: 13px; }
+input.active { border-color: var(--warn); background: var(--warn-soft); }
+.rec .month { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .weights { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
 .recs { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 14px; }
@@ -97,6 +101,14 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
         <label class="inline"><input id="free" type="checkbox"> Incluir gratis (:free, con límites)</label>
         <button id="reset" class="ghost">Valores por defecto</button>
       </div>
+      <div class="controls limits">
+        <b class="lim-title">Límites de precio</b>
+        <label>Máx. $ por tarea <input id="maxCost" type="number" min="0" step="0.01" placeholder="sin límite"></label>
+        <label>Máx. $ entrada / M tokens <input id="maxIn" type="number" min="0" step="0.1" placeholder="sin límite"></label>
+        <label>Máx. $ salida / M tokens <input id="maxOut" type="number" min="0" step="0.5" placeholder="sin límite"></label>
+        <label>Tareas al mes <input id="perMonth" type="number" min="0" step="10" placeholder="opcional"></label>
+        <button id="clearLimits" class="ghost">Quitar límites</button>
+      </div>
       <p class="note" id="note"></p>
       <div class="weights" id="weights"></div>
     </div>
@@ -136,6 +148,13 @@ const SHORT = {aa_intelligence:"AA int", aa_multilingual:"AA multi", aa_healthca
 
 let S = null, task = "coding", rows = [], sort = {k: "quality", asc: false}, hl = null;
 const prefs = {};  // per-task control values for this session
+// Price caps per million tokens and tasks/month apply to every tab and survive reloads;
+// the per-task cap lives in prefs[task] because each task costs differently.
+const LS = "ormp.limits";
+let limits = {};
+try { limits = JSON.parse(localStorage.getItem(LS) || "{}"); } catch (e) {}
+const saveLimits = () => { try { localStorage.setItem(LS, JSON.stringify(limits)); } catch (e) {} };
+const num = v => v === "" || v == null || isNaN(+v) ? null : +v;
 
 async function api(path, body) {
   const r = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
@@ -159,7 +178,8 @@ function setState(s) {
 function controls() {
   const t = S.tasks[task], p = prefs[task] || {};
   return {task, tokens_in: p.tokens_in ?? t.tokens_in, tokens_out: p.tokens_out ?? t.tokens_out,
-    min_context: p.min_context ?? t.min_context, min_coverage: p.min_coverage ?? 0.5, include_free: p.include_free ?? false};
+    min_context: p.min_context ?? t.min_context, min_coverage: p.min_coverage ?? 0.5, include_free: p.include_free ?? false,
+    max_cost: (limits.max_cost || {})[task] ?? null, max_in: limits.max_in ?? null, max_out: limits.max_out ?? null};
 }
 
 function show(t) {
@@ -173,6 +193,9 @@ function show(t) {
   $("#tin").value = c.tokens_in; $("#tout").value = c.tokens_out; $("#ctx").value = c.min_context;
   $("#cov").value = c.min_coverage; $("#covv").textContent = Math.round(c.min_coverage * 100) + "%";
   $("#free").checked = c.include_free;
+  for (const [id, v] of [["#maxCost", c.max_cost], ["#maxIn", c.max_in], ["#maxOut", c.max_out], ["#perMonth", limits.per_month ?? null]]) {
+    $(id).value = v ?? ""; $(id).classList.toggle("active", v != null && id !== "#perMonth");
+  }
   $("#note").textContent = td.note;
   $("#weights").innerHTML = Object.entries(td.weights).map(([k, w]) => `<span class="chip">${esc(S.metrics[k])} · ${Math.round(w * 100)}%</span>`).join("");
   rank();
@@ -180,12 +203,13 @@ function show(t) {
 
 let rankSeq = 0;
 async function rank() {
-  const seq = ++rankSeq, res = await api("/api/rank", controls());
+  const c = controls(), seq = ++rankSeq, res = await api("/api/rank", c);
   if (seq !== rankSeq) return;  // a newer request already answered
   rows = res.rows; hl = null;
   $("#recs").innerHTML = res.recs.length ? res.recs.map(r => `<div class="rec"><div class="lbl">${esc(r.label)}</div>
-      <div class="id">${esc(r.id)}</div><div class="nums">calidad <b>${r.quality.toFixed(1)}</b> · ${usd(r.cost)} / tarea</div></div>`).join("")
-    : `<div class="banner">Ningún modelo cumple los filtros${S.n_bench ? "" : " (faltan benchmarks: introduce la API key)"}.</div>`;
+      <div class="id">${esc(r.id)}</div><div class="nums">calidad <b>${r.quality.toFixed(1)}</b> · ${usd(r.cost)} / tarea</div>
+      ${limits.per_month ? `<div class="month">≈ $${(r.cost * limits.per_month).toFixed(2)} al mes (${limits.per_month} tareas)</div>` : ""}</div>`).join("")
+    : `<div class="banner">Ningún modelo cumple los filtros${S.n_bench ? (c.max_cost != null || c.max_in != null || c.max_out != null ? ": prueba a subir los límites de precio" : "") : " (faltan benchmarks: introduce la API key)"}.</div>`;
   chart(); table();
 }
 
@@ -198,7 +222,7 @@ function chart() {
   const X = c => L + (Math.log10(c) - x0) / (x1 - x0) * (W - L - R), Y = q => T + (100 - q) / 100 * (H - T - B);
   let g = "";
   for (let q = 0; q <= 100; q += 25) g += `<line x1="${L}" x2="${W - R}" y1="${Y(q)}" y2="${Y(q)}" stroke="var(--line)"/><text x="${L - 8}" y="${Y(q) + 4}" text-anchor="end">${q}</text>`;
-  for (let e = x0; e <= x1; e++) g += `<line x1="${X(10 ** e)}" x2="${X(10 ** e)}" y1="${T}" y2="${H - B}" stroke="var(--line)"/><text x="${X(10 ** e)}" y="${H - B + 16}" text-anchor="middle">${usd(10 ** e)}</text>`;
+  for (let e = x0; e <= x1; e++) g += `<line x1="${X(10 ** e)}" x2="${X(10 ** e)}" y1="${T}" y2="${H - B}" stroke="var(--line)"/><text x="${X(10 ** e)}" y="${H - B + 16}" text-anchor="${e === x1 ? "end" : e === x0 ? "start" : "middle"}">${usd(10 ** e)}</text>`;
   g += `<text x="${(W + L) / 2}" y="${H - 4}" text-anchor="middle">coste por tarea (USD)</text><text x="12" y="${(H - B) / 2}" transform="rotate(-90 12 ${(H - B) / 2})" text-anchor="middle">calidad</text>`;
   const front = pts.filter(r => r.pareto).sort((a, b) => a.task_cost - b.task_cost);
   if (front.length > 1) {
@@ -206,6 +230,9 @@ function chart() {
     for (const r of front.slice(1)) d += ` H${X(r.task_cost)} V${Y(r.quality)}`;
     g += `<path d="${d}" fill="none" stroke="var(--good)" stroke-width="1.5" stroke-dasharray="4 3"/>`;
   }
+  const mc = controls().max_cost;
+  if (mc != null && mc > 0 && Math.log10(mc) >= x0 && Math.log10(mc) <= x1)
+    g += `<line x1="${X(mc)}" x2="${X(mc)}" y1="${T}" y2="${H - B}" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="6 4"/><text x="${X(mc) - 6}" y="${T + 12}" text-anchor="end" style="fill:var(--warn)">tu límite ${usd(mc)}</text>`;
   const order = [...pts].sort((a, b) => a.pareto - b.pareto);
   g += order.map(r => `<circle data-id="${esc(r.id)}" cx="${X(r.task_cost)}" cy="${Y(r.quality)}" r="${r.id === hl ? 7 : r.pareto ? 5.5 : 4}"
       fill="${r.pareto ? "var(--good)" : "var(--dot)"}" fill-opacity="${r.pareto ? 1 : .55}" stroke="${r.id === hl ? "var(--text)" : "none"}" stroke-width="2" style="cursor:pointer"/>`).join("");
@@ -268,6 +295,18 @@ bindControl("#ctx", "min_context", e => +e.value || 0);
 bindControl("#cov", "min_coverage", e => +e.value);
 bindControl("#free", "include_free", e => e.checked);
 $("#reset").onclick = () => { delete prefs[task]; show(task); };
+function bindLimit(id, set) {
+  $(id).addEventListener("input", () => {
+    set(num($(id).value)); saveLimits();
+    $(id).classList.toggle("active", num($(id).value) != null && id !== "#perMonth");
+    clearTimeout(bindControl.t); bindControl.t = setTimeout(rank, 250);
+  });
+}
+bindLimit("#maxCost", v => limits.max_cost = {...(limits.max_cost || {}), [task]: v});
+bindLimit("#maxIn", v => limits.max_in = v);
+bindLimit("#maxOut", v => limits.max_out = v);
+bindLimit("#perMonth", v => limits.per_month = v);
+$("#clearLimits").onclick = () => { const pm = limits.per_month; limits = {per_month: pm}; saveLimits(); show(task); };
 $("#filter").oninput = table;
 $("#onlyPareto").onchange = table;
 $("#cq").oninput = () => { clearTimeout(cmpTimer); cmpTimer = setTimeout(compare, 250); };

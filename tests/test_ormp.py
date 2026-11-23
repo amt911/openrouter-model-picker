@@ -135,11 +135,41 @@ class Ranking(unittest.TestCase):
         self.assertEqual([r.model.id for r in ormp.pareto(rows)], ["x", "z"])
 
 
+class PriceLimits(unittest.TestCase):
+    def setUp(self):
+        self.m, _ = build()
+        self.models = list(self.m.values())
+        self.t = ormp.TASKS["rewrite"]
+
+    def ids(self, **caps):
+        return [r.model.id for r in ormp.rank(self.models, self.t, **caps)]
+
+    def test_max_cost_per_task(self):
+        cap = self.m["b/mid"].cost(self.t)  # inclusive
+        self.assertEqual(self.ids(max_cost=cap), ["b/mid", "c/cheap"])
+
+    def test_max_in_and_out_per_million(self):
+        self.assertEqual(self.ids(max_in=1.0), ["b/mid", "c/cheap"])
+        self.assertEqual(self.ids(max_out=0.5), ["c/cheap"])
+        self.assertEqual(self.ids(max_in=2, max_out=3), ["c/cheap"])
+
+    def test_caps_do_not_change_scores(self):
+        full = {r.model.id: r.quality for r in ormp.rank(self.models, self.t)}
+        capped = {r.model.id: r.quality for r in ormp.rank(self.models, self.t, max_out=5)}
+        self.assertEqual(capped, {k: full[k] for k in capped})
+
+    def test_best_within_budget_label(self):
+        rows = ormp.rank(self.models, self.t, max_cost=0.05)
+        label, r = ormp.recommendations(rows, limited=True)[0]
+        self.assertIn("límite", label)
+        self.assertEqual(r.model.id, "b/mid")
+
+
 class EndToEnd(unittest.TestCase):
     def test_show_task_prints_recommendation(self):
         import io, contextlib, argparse
         m, _ = build()
-        opts = argparse.Namespace(min_coverage=0.5, include_free=False, limit=5)
+        opts = argparse.Namespace(min_coverage=0.5, include_free=False, limit=5, max_cost=None, max_in=None, max_out=None)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rows = ormp.show_task(list(m.values()), ormp.TASKS["papers"], opts)

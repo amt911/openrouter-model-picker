@@ -57,13 +57,15 @@ def rank_json(state: State, body: dict) -> dict:
     t = dataclasses.replace(base, tokens_in=int(body.get("tokens_in", base.tokens_in)),
                             tokens_out=int(body.get("tokens_out", base.tokens_out)),
                             min_context=int(body.get("min_context", base.min_context)))
-    rows = ormp.rank(state.models, t, float(body.get("min_coverage", 0.5)), bool(body.get("include_free")))
+    caps = {k: (float(body[k]) if body.get(k) not in (None, "") else None)
+            for k in ("max_cost", "max_in", "max_out")}
+    rows = ormp.rank(state.models, t, float(body.get("min_coverage", 0.5)), bool(body.get("include_free")), **caps)
     front = {r.model.id for r in ormp.pareto(rows)}
     return {
         "rows": [{**model_json(r.model), "quality": r.quality, "coverage": r.coverage, "task_cost": r.cost,
                   "pareto": r.model.id in front} for r in rows],
         "recs": [{"label": label, "id": r.model.id, "quality": r.quality, "cost": r.cost}
-                 for label, r in ormp.recommendations(rows)],
+                 for label, r in ormp.recommendations(rows, any(v is not None for v in caps.values()))],
     }
 
 

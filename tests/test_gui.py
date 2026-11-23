@@ -54,6 +54,12 @@ class GuiApi(unittest.TestCase):
         self.req("POST", "/api/rank", {"task": "papers", "tokens_in": 1, "min_context": 0})
         self.assertEqual(ormp.TASKS["papers"].tokens_in, before)
 
+    def test_rank_with_price_caps(self):
+        st, body = self.req("POST", "/api/rank", {"task": "rewrite", "max_out": "5", "max_cost": "", "max_in": None})
+        d = json.loads(body)
+        self.assertEqual([r["id"] for r in d["rows"]], ["b/mid", "c/cheap"])
+        self.assertIn("límite", d["recs"][0]["label"])
+
     def test_compare(self):
         st, body = self.req("GET", "/api/models?q=big")
         self.assertEqual({m["id"] for m in json.loads(body)}, {"a/big", "a/big:free", "a/big:batch"})
