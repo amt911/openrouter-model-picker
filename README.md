@@ -34,6 +34,14 @@ python3 ormp.py                       # menú interactivo en la terminal
   que pagas hoy al mes: con eso el volumen se calibra a tu factura real y todos los costes
   pasan a $/mes. En el gráfico tu modelo sale en naranja y la zona verde de arriba a la
   izquierda es "mejor y más barato".
+- **Proveedores**: haz clic en un modelo (tabla o gráfico) para ver todos los proveedores
+  que lo sirven en OpenRouter, ordenados por coste con tu perfil: precio, caché,
+  cuantización (fp4/fp8), nivel *flex*, uptime de 24 h y soporte de herramientas. El mismo
+  modelo puede costar la mitad según quién lo sirva; el panel te dice cómo fijar el proveedor
+  (`"provider": {"order": [...]}` o `{"sort": "price"}`).
+- **Filtros de tabla**: por autor (deepseek, google…), solo frontera, y «mostrar con pocos
+  datos» para ver los modelos que no llegan a la cobertura mínima (salen marcados y no
+  entran en las recomendaciones).
 - **Límites de precio**: presupuesto máximo al mes, máximo $ por tarea (por pestaña), máximo $ de entrada y de salida
   por millón de tokens (para todas las pestañas) y tareas al mes para ver el gasto
   mensual estimado. Se recuerdan entre sesiones y la línea naranja del gráfico marca tu

@@ -96,10 +96,10 @@ def _get(path: str, params: dict | None = None, key: str | None = None) -> dict:
         return json.load(r)
 
 
-def cached(name: str, fetch, refresh: bool = False) -> dict:
+def cached(name: str, fetch, refresh: bool = False, ttl: int = CACHE_TTL) -> dict:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     f = CACHE_DIR / f"{name}.json"
-    if not refresh and f.exists() and time.time() - f.stat().st_mtime < CACHE_TTL:
+    if not refresh and f.exists() and time.time() - f.stat().st_mtime < ttl:
         return json.loads(f.read_text())
     data = fetch()
     f.write_text(json.dumps(data))
@@ -307,6 +307,47 @@ def pareto(rows: list[Row]) -> list[Row]:
             front.append(r)
             best = r.quality
     return front
+
+
+# ---------------------------------------------------------------- providers
+@dataclass
+class Endpoint:
+    provider: str
+    tag: str
+    tier: str | None
+    quantization: str | None
+    model: Model  # carries this provider's prices, so Model.cost works unchanged
+    uptime_1d: float | None
+    latency_ms: float | None
+    throughput: float | None
+    tools: bool
+    discount: float
+
+
+def fetch_endpoints(model_id: str, refresh: bool = False) -> dict:
+    """Per-provider offers for one model (public endpoint, cached 1 h: uptime moves)."""
+    safe = model_id.replace("/", "__").replace(":", "_")
+    return cached(f"endpoints_{safe}", lambda: _get(f"/models/{model_id}/endpoints"), refresh, ttl=3600)
+
+
+def parse_endpoints(raw: dict) -> list[Endpoint]:
+    out = []
+    for e in (raw.get("data") or {}).get("endpoints") or []:
+        p = e.get("pricing") or {}
+        try:
+            avg = weekly_avg_prices(p)
+            pin, pout = avg["prompt"], avg["completion"]
+        except (KeyError, ValueError, TypeError):
+            continue
+        if pin < 0 or pout < 0:
+            continue
+        m = Model(e.get("model_id", ""), e.get("model_name", ""), pin, pout, int(e.get("context_length") or 0),
+                  price_cache=avg.get("input_cache_read"), variable_price=bool(p.get("overrides")))
+        out.append(Endpoint(e.get("provider_name", "?"), e.get("tag", ""), e.get("service_tier"),
+                            e.get("quantization"), m, e.get("uptime_last_1d"), e.get("latency_last_30m"),
+                            e.get("throughput_last_30m"), "tools" in (e.get("supported_parameters") or []),
+                            float(p.get("discount") or 0)))
+    return out
 
 
 def baseline_row(models: list[Model], t: Task, model_id: str | None) -> Row | None:

@@ -47,19 +47,36 @@ class State:
 
 
 def model_json(m: ormp.Model) -> dict:
-    return {"id": m.id, "name": m.name, "price_in": m.price_in * 1e6, "price_out": m.price_out * 1e6,
+    return {"id": m.id, "author": m.id.split("/")[0], "name": m.name, "price_in": m.price_in * 1e6, "price_out": m.price_out * 1e6,
             "context": m.context, "free": m.free, "metrics": m.metrics,
             "price_cache": None if m.price_cache is None else m.price_cache * 1e6, "variable_price": m.variable_price,
             "cost": {k: m.cost(t) for k, t in ormp.TASKS.items()}}
 
 
-def rank_json(state: State, body: dict) -> dict:
+def task_from(body: dict) -> ormp.Task:
     base = ormp.TASKS[body.get("task", "coding")]
     # Per-request copy: GUI tweaks never change the defaults shared with other requests.
-    t = dataclasses.replace(base, tokens_in=int(body.get("tokens_in", base.tokens_in)),
-                            tokens_out=int(body.get("tokens_out", base.tokens_out)),
-                            min_context=int(body.get("min_context", base.min_context)),
-                            cache_hit=min(1.0, max(0.0, float(body.get("cache_hit", base.cache_hit)))))
+    return dataclasses.replace(base, tokens_in=int(body.get("tokens_in", base.tokens_in)),
+                               tokens_out=int(body.get("tokens_out", base.tokens_out)),
+                               min_context=int(body.get("min_context", base.min_context)),
+                               cache_hit=min(1.0, max(0.0, float(body.get("cache_hit", base.cache_hit)))))
+
+
+def providers_json(body: dict, fetch=ormp.fetch_endpoints) -> dict:
+    t = task_from(body)
+    eps = ormp.parse_endpoints(fetch(body["id"]))
+    eps.sort(key=lambda e: e.model.cost(t))
+    return {"id": body["id"], "providers": [{
+        "provider": e.provider, "tag": e.tag, "tier": e.tier, "quantization": e.quantization,
+        "price_in": e.model.price_in * 1e6, "price_out": e.model.price_out * 1e6,
+        "price_cache": None if e.model.price_cache is None else e.model.price_cache * 1e6,
+        "variable_price": e.model.variable_price, "context": e.model.context, "cost": e.model.cost(t),
+        "uptime_1d": e.uptime_1d, "latency_ms": e.latency_ms, "throughput": e.throughput,
+        "tools": e.tools, "discount": e.discount} for e in eps]}
+
+
+def rank_json(state: State, body: dict) -> dict:
+    t = task_from(body)
     def opt(k):
         v = body.get(k)
         return float(v) if v not in (None, "") else None
@@ -76,8 +93,13 @@ def rank_json(state: State, body: dict) -> dict:
     if budget is not None and per_month:
         per_unit = budget / per_month
         caps["max_cost"] = per_unit if caps["max_cost"] is None else min(caps["max_cost"], per_unit)
-    rows = ormp.rank(state.models, t, float(body.get("min_coverage", 0.5)), bool(body.get("include_free")), **caps)
+    min_cov = float(body.get("min_coverage", 0.5))
+    rows = ormp.rank(state.models, t, min_cov, bool(body.get("include_free")), **caps)
     front = {r.model.id for r in ormp.pareto(rows)}
+    # Models hidden only by the coverage threshold: shown on request, never recommended.
+    ranked = {r.model.id for r in rows}
+    low = [r for r in ormp.rank(state.models, t, 0.0, bool(body.get("include_free")), **caps)
+           if r.model.id not in ranked]
 
     def row_json(r):
         return {**model_json(r.model), "quality": r.quality, "coverage": r.coverage, "task_cost": r.cost}
@@ -88,6 +110,7 @@ def rank_json(state: State, body: dict) -> dict:
         "vs_baseline": [{"label": label, "id": r.model.id, "quality": r.quality, "cost": r.cost}
                         for label, r in (ormp.vs_baseline(rows, b) if b else [])],
         "rows": [{**row_json(r), "pareto": r.model.id in front} for r in rows],
+        "low_coverage": [{**row_json(r), "pareto": False, "low": True} for r in low],
         "recs": [{"label": label, "id": r.model.id, "quality": r.quality, "cost": r.cost}
                  for label, r in ormp.recommendations(rows, any(v is not None for v in caps.values()))],
     }
@@ -147,6 +170,8 @@ def make_handler(state: State, port: int):
                 path = urlparse(self.path).path
                 if path == "/api/rank":
                     self._json(rank_json(state, body))
+                elif path == "/api/providers":
+                    self._json(providers_json(body))
                 elif path == "/api/key":
                     # No "key" in the body (e.g. "refresh") keeps the current key.
                     key = body["key"].strip() if isinstance(body.get("key"), str) else None

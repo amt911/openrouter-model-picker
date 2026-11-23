@@ -42,6 +42,7 @@ nav button.on { color: var(--text); border-bottom-color: var(--accent); font-wei
 .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; }
 .controls label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
 .controls label.inline { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+.controls label.inline.muted { color: var(--muted); }
 .note { color: var(--muted); margin: 10px 0 0; }
 .limits { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
 .lim-title { align-self: center; font-size: 13px; }
@@ -51,6 +52,12 @@ input.active { border-color: var(--warn); background: var(--warn-soft); }
 .rec.better { border-left-color: var(--good); background: var(--good-soft); }
 td.pos { color: var(--good); } td.neg { color: var(--warn); }
 tr.isbase td { box-shadow: inset 0 -2px 0 var(--warn); }
+tr.low td { opacity: .6; }
+.tag { font-size: 11px; border-radius: 4px; padding: 1px 5px; background: var(--warn-soft); color: var(--warn); margin-left: 4px; }
+.tag.ok { background: var(--good-soft); color: var(--good); }
+select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+#provPanel code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+#table tbody tr { cursor: pointer; }
 #usageInfo { align-self: center; font-size: 12px; }
 .weights { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
@@ -137,10 +144,17 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
         <span class="muted">Verde = frontera calidad/precio. Naranja = tu modelo actual: arriba a la izquierda están los mejores y más baratos. Eje X logarítmico.</span></div>
       <div class="chart-wrap"><svg id="chart" viewBox="0 0 900 360" role="img" aria-label="Calidad frente a coste"></svg><div class="tip" id="tip"></div></div>
     </div>
+    <div class="panel hidden" id="provPanel">
+      <div class="tablebar"><b id="provTitle"></b><button class="ghost" id="provClose">Cerrar</button></div>
+      <p class="note" id="provNote"></p>
+      <div class="scroll"><table id="ptable"></table></div>
+    </div>
     <div class="panel">
       <div class="tablebar"><b id="count"></b>
-        <span><label class="muted" id="onlyBetterBox"><input id="onlyBetter" type="checkbox"> solo mejores y más baratos que mi modelo</label>
-        <label class="muted"><input id="onlyPareto" type="checkbox"> solo frontera</label>
+        <span class="controls" style="gap:10px;align-items:center"><select id="author"><option value="">Todos los autores</option></select>
+        <label class="muted inline"><input id="showLow" type="checkbox"> mostrar <span id="lowN">0</span> con pocos datos</label>
+        <label class="muted inline" id="onlyBetterBox"><input id="onlyBetter" type="checkbox"> solo mejores y más baratos que mi modelo</label>
+        <label class="muted inline"><input id="onlyPareto" type="checkbox"> solo frontera</label>
         <input id="filter" type="text" placeholder="filtrar modelo…"></span></div>
       <div class="scroll"><table id="table"></table></div>
     </div>
@@ -281,6 +295,10 @@ async function rank() {
   if (!r.recs.length) html += `<div class="banner">Ningún modelo cumple los filtros${S.n_bench ? (c.max_cost != null || c.max_in != null || c.max_out != null || c.budget != null ? ": prueba a subir los límites de precio" : "") : " (faltan benchmarks: introduce la API key)"}.</div>`;
   $("#recs").innerHTML = html;
   $("#onlyBetterBox").classList.toggle("hidden", !b);
+  $("#lowN").textContent = r.low_coverage.length;
+  const authors = [...new Set(r.rows.concat(r.low_coverage).map(x => x.author))].sort(), cur = $("#author").value;
+  $("#author").innerHTML = `<option value="">Todos los autores</option>` + authors.map(a => `<option ${a === cur ? "selected" : ""}>${esc(a)}</option>`).join("");
+  $("#provPanel").classList.add("hidden");
   $("#chartTitle").textContent = monthly() ? "Calidad vs. coste al mes" : `Calidad vs. coste por ${td.unit}`;
   chart(); table();
 }
@@ -325,19 +343,23 @@ function chart() {
     c.onmousemove = e => { const bb = svg.parentElement.getBoundingClientRect(), x = e.clientX - bb.left;
       tip.style.left = Math.min(x + 12, bb.width - tip.offsetWidth - 4) + "px"; tip.style.top = (e.clientY - bb.top + 12) + "px"; };
     c.onmouseleave = () => tip.style.display = "none";
-    c.onclick = () => { hl = c.dataset.id; chart(); table(); document.querySelector("tr.hl")?.scrollIntoView({block: "center", behavior: "smooth"}); };
+    c.onclick = () => { hl = c.dataset.id; chart(); table(); providers(hl); };
   });
 }
 
 function table() {
   const td = S.tasks[task], mk = Object.keys(td.weights), f = $("#filter").value.toLowerCase(), b = res.baseline;
   const better = r => b && r.quality > b.quality && r.task_cost < b.task_cost;
-  let rs = rows.filter(r => (!f || r.id.toLowerCase().includes(f)) && (!$("#onlyPareto").checked || r.pareto)
+  const au = $("#author").value;
+  let rs = rows.concat($("#showLow").checked ? res.low_coverage : [])
+    .filter(r => (!f || r.id.toLowerCase().includes(f)) && (!au || r.author === au) && (!$("#onlyPareto").checked || r.pareto)
     && (!b || !$("#onlyBetter").checked || better(r)));
   const val = (r, k) => k === "d_cost" ? (b ? r.task_cost / b.task_cost : 0) : k === "d_q" ? (b ? r.quality - b.quality : 0)
     : k in r ? r[k] : r.metrics[k] ?? -Infinity;
   rs.sort((a, c) => (sort.k === "id" ? a.id.localeCompare(c.id) : val(a, sort.k) - val(c, sort.k)) * (sort.asc ? 1 : -1));
   $("#count").textContent = `${rs.length} modelos`;
+  const hidden = res.low_coverage.filter(r => !$("#showLow").checked && (!f || r.id.toLowerCase().includes(f)) && (!au || r.author === au)).length;
+  if (hidden && (f || au)) $("#count").textContent += ` (+${hidden} ocultos por pocos datos)`;
   const cols = [["#", null], ["modelo", "id"], ["calidad", "quality"], ["cobert.", "coverage"],
     [monthly() ? "$/mes" : "$/" + td.unit, "task_cost"], ...(b ? [["Δ calidad", "d_q"], ["Δ coste", "d_cost"]] : []),
     ["$ in/M", "price_in"], ["$ caché/M", "price_cache"], ["$ out/M", "price_out"], ["contexto", "context"], ...mk.map(k => [SHORT[k], k])];
@@ -345,15 +367,47 @@ function table() {
   const delta = r => !b ? "" : `<td class="${r.quality - b.quality >= 0 ? "pos" : "neg"}">${r.quality - b.quality >= 0 ? "+" : ""}${(r.quality - b.quality).toFixed(1)}</td>
     <td class="${r.task_cost <= b.task_cost ? "pos" : "neg"}">${b.task_cost ? (r.task_cost / b.task_cost - 1 >= 0 ? "+" : "") + Math.round((r.task_cost / b.task_cost - 1) * 100) + "%" : "–"}</td>`;
   $("#table").innerHTML = `<thead><tr>${cols.map(([n, k]) => `<th data-k="${k ?? ""}" title="${esc(S.metrics[k] ?? "")}" class="${k === sort.k ? "sorted" + (sort.asc ? " asc" : "") : ""}">${n}</th>`).join("")}</tr></thead><tbody>` +
-    rs.map((r, i) => `<tr class="${r.pareto ? "pareto" : ""} ${r.id === hl ? "hl" : ""} ${b && r.id === b.id ? "isbase" : ""}" data-id="${esc(r.id)}"><td class="muted">${i + 1}</td>
-      <td>${r.pareto ? '<span class="star" title="frontera calidad/precio">★</span> ' : ""}${esc(r.id)}${r.variable_price ? ' <span class="muted" title="El precio cambia según la hora; se muestra la media de una semana de uso continuo">⏱</span>' : ""}</td>
+    rs.map((r, i) => `<tr class="${r.pareto ? "pareto" : ""} ${r.low ? "low" : ""} ${r.id === hl ? "hl" : ""} ${b && r.id === b.id ? "isbase" : ""}" data-id="${esc(r.id)}"><td class="muted">${i + 1}</td>
+      <td>${r.pareto ? '<span class="star" title="frontera calidad/precio">★</span> ' : ""}${esc(r.id)}${r.low ? ' <span class="tag" title="Tiene pocos benchmarks para esta tarea: su calidad es poco fiable y no entra en las recomendaciones">pocos datos</span>' : ""}${r.variable_price ? ' <span class="muted" title="El precio cambia según la hora; se muestra la media de una semana de uso continuo">⏱</span>' : ""}</td>
       <td><span class="bar" style="width:${(r.quality * 0.6).toFixed(0)}px"></span>${r.quality.toFixed(1)}</td>
       <td>${Math.round(r.coverage * 100)}%</td><td>${cell(r)}</td>${delta(r)}<td>${pm(r.price_in)}</td>
       <td>${r.price_cache == null ? '<span class="muted" title="sin caché: paga toda la entrada">–</span>' : pm(r.price_cache)}</td><td>${pm(r.price_out)}</td><td>${kctx(r.context)}</td>
       ${mk.map(k => `<td>${k in r.metrics ? r.metrics[k].toFixed(k === "da_coding_elo" ? 0 : 1) : '<span class="muted">–</span>'}</td>`).join("")}</tr>`).join("") + "</tbody>";
   $("#table").querySelectorAll("th[data-k]").forEach(th => th.dataset.k && (th.onclick = () => {
     sort = {k: th.dataset.k, asc: sort.k === th.dataset.k ? !sort.asc : ["id", "task_cost", "price_in", "price_out", "price_cache", "d_cost"].includes(th.dataset.k)}; table(); }));
-  $("#table").querySelectorAll("tbody tr").forEach(tr => tr.onclick = () => { hl = tr.dataset.id; chart(); table(); });
+  $("#table").querySelectorAll("tbody tr").forEach(tr => tr.onclick = () => { hl = tr.dataset.id; chart(); table(); providers(hl); });
+}
+
+let provSeq = 0;
+async function providers(id) {
+  const seq = ++provSeq, panel = $("#provPanel"), td = S.tasks[task];
+  panel.classList.remove("hidden");
+  $("#provTitle").textContent = `Proveedores de ${id}`;
+  $("#provNote").textContent = "Cargando precios por proveedor…";
+  $("#ptable").innerHTML = "";
+  panel.scrollIntoView({block: "start", behavior: "smooth"});
+  let d;
+  try { d = await api("/api/providers", {...controls(), id}); } catch (e) { $("#provNote").textContent = "Error: " + e.message; return; }
+  if (seq !== provSeq) return;
+  const row = rows.concat(res.low_coverage).find(r => r.id === id) || (res.baseline && res.baseline.id === id ? res.baseline : null);
+  const ref = row ? row.task_cost : null, ps = d.providers;
+  if (!ps.length) { $("#provNote").textContent = "OpenRouter no lista proveedores para este modelo."; return; }
+  const cheapOk = ps.find(p => p.tools && (p.uptime_1d ?? 0) >= 99);
+  $("#provNote").innerHTML = `Mismo modelo, ${ps.length} proveedores con precios distintos (ordenados por coste con tu perfil). `
+    + (cheapOk && ref ? `El más barato con herramientas y uptime ≥ 99%: <b>${esc(cheapOk.provider)}</b> (${money(cheapOk.cost)}, ${Math.round((cheapOk.cost / ref - 1) * 100)}% frente al precio que usa el ranking). ` : "")
+    + `Para fijarlo, en la petición a OpenRouter: <code>"provider": {"order": ["${esc(cheapOk ? cheapOk.tag : ps[0].tag)}"]}</code>, o <code>"provider": {"sort": "price"}</code> para ir siempre al más barato. `
+    + `Ojo: <b>fp4/fp8</b> son versiones cuantizadas (más baratas, pueden rendir algo peor) y <b>flex</b> es un nivel de servicio más lento o con menos prioridad.`;
+  const fmtq = q => q && q !== "unknown" ? `<span class="tag ${/^(bf16|fp16|fp32)$/.test(q) ? "ok" : ""}">${esc(q)}</span>` : '<span class="muted">?</span>';
+  $("#ptable").innerHTML = `<thead><tr><th>proveedor</th><th>variante</th><th>cuantiz.</th><th>${monthly() ? "$/mes" : "$/" + esc(td.unit)}</th><th>vs ranking</th>
+      <th>$ in/M</th><th>$ caché/M</th><th>$ out/M</th><th>contexto</th><th>uptime 24 h</th><th>latencia</th><th>tok/s</th><th>tools</th></tr></thead><tbody>` +
+    ps.map(p => `<tr><td>${esc(p.provider)}${p.discount ? ` <span class="tag ok">-${Math.round(p.discount * 100)}%</span>` : ""}</td>
+      <td class="muted">${esc(p.tag)}${p.tier ? ` <span class="tag">${esc(p.tier)}</span>` : ""}${p.variable_price ? " ⏱" : ""}</td><td>${fmtq(p.quantization)}</td>
+      <td>${monthly() ? "$" + int(shown(p.cost)) : usd(p.cost)}</td>
+      <td class="${ref && p.cost <= ref ? "pos" : "neg"}">${ref ? (p.cost / ref - 1 >= 0 ? "+" : "") + Math.round((p.cost / ref - 1) * 100) + "%" : "–"}</td>
+      <td>${pm(p.price_in)}</td><td>${p.price_cache == null ? "–" : pm(p.price_cache)}</td><td>${pm(p.price_out)}</td><td>${kctx(p.context)}</td>
+      <td class="${(p.uptime_1d ?? 0) >= 99 ? "pos" : "neg"}">${p.uptime_1d == null ? "–" : p.uptime_1d.toFixed(1) + "%"}</td>
+      <td>${p.latency_ms == null ? "–" : Math.round(p.latency_ms) + " ms"}</td><td>${p.throughput == null ? "–" : Math.round(p.throughput)}</td>
+      <td>${p.tools ? "✓" : '<span class="neg">✗</span>'}</td></tr>`).join("") + "</tbody>";
 }
 
 let cmpTimer;
@@ -406,6 +460,9 @@ $("#clearLimits").onclick = () => { limits = {}; saveLimits(); show(task); };
 $("#filter").oninput = table;
 $("#onlyPareto").onchange = table;
 $("#onlyBetter").onchange = table;
+$("#showLow").onchange = table;
+$("#author").onchange = table;
+$("#provClose").onclick = () => $("#provPanel").classList.add("hidden");
 $("#cq").oninput = () => { clearTimeout(cmpTimer); cmpTimer = setTimeout(compare, 250); };
 
 async function busy(btn, fn) {

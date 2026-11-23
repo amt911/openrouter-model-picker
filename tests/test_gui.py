@@ -78,6 +78,31 @@ class GuiApi(unittest.TestCase):
         self.assertFalse(d["calibrated"])
         self.assertAlmostEqual(d["max_cost_effective"], 0.00001)
 
+    def test_low_coverage_listed_but_not_ranked(self):
+        st, body = self.req("POST", "/api/rank", {"task": "coding", "min_coverage": 0.6})
+        d = json.loads(body)
+        self.assertNotIn("b/mid", [r["id"] for r in d["rows"]])
+        self.assertIn("b/mid", [r["id"] for r in d["low_coverage"]])
+        self.assertTrue(all(r["low"] and not r["pareto"] for r in d["low_coverage"]))
+
+    def test_providers_sorted_by_cost_with_cache(self):
+        raw = {"data": {"endpoints": [
+            {"provider_name": "Dear", "tag": "dear/fp8", "quantization": "fp8", "model_id": "x/y", "context_length": 100,
+             "pricing": {"prompt": "0.000001", "completion": "0.000001"}, "supported_parameters": ["tools"],
+             "uptime_last_1d": 99.9},
+            {"provider_name": "Cheap", "tag": "cheap/fp4", "quantization": "fp4", "model_id": "x/y", "context_length": 100,
+             "service_tier": "flex", "pricing": {"prompt": "0.000002", "completion": "0.000001",
+                                                 "input_cache_read": "0.0000001", "discount": 0.5},
+             "supported_parameters": [], "uptime_last_1d": 90},
+            {"provider_name": "Broken", "pricing": {"prompt": "-1", "completion": "-1"}}]}}
+        d = gui.providers_json({"task": "coding", "id": "x/y"}, fetch=lambda _id: raw)
+        ps = d["providers"]
+        self.assertEqual([p["provider"] for p in ps], ["Cheap", "Dear"])  # cache makes the pricier input cheaper
+        self.assertEqual(ps[0]["tier"], "flex")
+        self.assertFalse(ps[0]["tools"])
+        self.assertEqual(ps[0]["discount"], 0.5)
+        self.assertAlmostEqual(ps[1]["price_in"], 1.0)
+
     def test_compare(self):
         st, body = self.req("GET", "/api/models?q=big")
         self.assertEqual({m["id"] for m in json.loads(body)}, {"a/big", "a/big:free", "a/big:batch"})
