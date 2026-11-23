@@ -61,6 +61,15 @@ def build():
     return {m.id: m for m in models}, cites
 
 
+class MediaBenchIgnoredForText(unittest.TestCase):
+    def test_design_arena_image_scores_do_not_become_coding_elo(self):
+        models, index = ormp.parse_catalog(CATALOG)
+        bench = {**BENCH, "da_image": {"meta": {}, "data": [
+            {"source": "design-arena", "model_permaslug": "b/mid", "elo": 9999, "category": "image"}]}}
+        ormp.attach_benchmarks(models, index, bench)
+        self.assertNotIn("da_coding_elo", {m.id: m for m in models}["b/mid"].metrics)
+
+
 class Catalog(unittest.TestCase):
     def test_filters_routers_and_non_text(self):
         ids = {m.id for m in ormp.parse_catalog(CATALOG)[0]}
@@ -230,6 +239,18 @@ def ep(provider, pin, pout, quant="fp8", uptime=100, tools=True, cache=None):
         pricing["input_cache_read"] = str(cache)
     return {"provider_name": provider, "tag": provider.lower(), "quantization": quant, "uptime_last_1d": uptime,
             "context_length": 10**6, "pricing": pricing, "supported_parameters": ["tools"] if tools else []}
+
+
+class Watermark(unittest.TestCase):
+    def test_exclude_authors_in_rank_and_advise(self):
+        m, _ = build()
+        models = list(m.values())
+        t = ormp.TASKS["rewrite"]
+        self.assertNotIn("a/big", [r.model.id for r in ormp.rank(models, t, exclude_authors=("a",))])
+        adv = ormp.advise(models, t, lambda mid: (_ for _ in ()).throw(OSError()), None, per_month=10,
+                          exclude_authors=("a",))
+        self.assertNotIn("a/big", [o.row.model.id for _, o, _ in adv.picks])
+        self.assertEqual(ormp.WATERMARK_AUTHORS, ("google", "openai", "anthropic"))
 
 
 class Advisor(unittest.TestCase):

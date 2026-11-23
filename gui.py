@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import media
 import ormp
 
 HTML = Path(__file__).with_name("gui.html")
@@ -25,12 +26,22 @@ class State:
         self.key = key
         self.models: list[ormp.Model] = []
         self.citations: list[str] = []
+        self.media_raw: dict | None = None  # image/video/STT catalogs, fetched on first use
+
+    def media_models(self, resolution="1080p", audio=False, fetch=media.fetch_all):
+        with self.lock:
+            if self.media_raw is None:
+                self.media_raw = fetch()
+            raw = self.media_raw
+        return media.build(raw, media.elo_from_bench(ormp.LAST_BENCH), resolution, audio)
 
     def reload(self, key: str | None = None, refresh: bool = False) -> None:
         with self.lock:
             if key is not None:
                 self.key = key or None
             self.models, self.citations = ormp.load(self.key, refresh)
+            if refresh:
+                self.media_raw = None
 
     def summary(self) -> dict:
         return {
@@ -43,6 +54,7 @@ class State:
                           "tokens_out": t.tokens_out, "min_context": t.min_context, "note": t.note,
                           "unit": t.unit, "units": t.units, "cache_hit": t.cache_hit}
                       for k, t in ormp.TASKS.items()},
+            "watermark_authors": list(ormp.WATERMARK_AUTHORS),
         }
 
 
@@ -120,7 +132,8 @@ def recommend_json(state: State, body: dict, fetch=ormp.fetch_endpoints) -> dict
         spend = float(tb["spend"]) if tb.get("spend") else None
         if b and spend and b.cost > 0:
             per_month = spend / b.cost
-        ids = [r.model.id for r in ormp.rank(state.models, t, 0.5)] + ([baseline] if baseline else [])
+        excl = tuple(tb.get("exclude_authors") or ())
+        ids = [r.model.id for r in ormp.rank(state.models, t, 0.5, exclude_authors=excl)] + ([baseline] if baseline else [])
         got = prefetch(ids, fetch)
 
         def endpoints_for(mid, got=got):
@@ -134,7 +147,7 @@ def recommend_json(state: State, body: dict, fetch=ormp.fetch_endpoints) -> dict
             return float(v) if v not in (None, "") else None
         max_in, max_out = num("max_in"), num("max_out")
         adv = ormp.advise(state.models, t, endpoints_for, baseline, per_month,
-                          max_in=max_in, max_out=max_out, budget=num("budget"))
+                          max_in=max_in, max_out=max_out, budget=num("budget"), exclude_authors=excl)
 
         def offer(o):
             e = o.endpoint
@@ -147,8 +160,48 @@ def recommend_json(state: State, body: dict, fetch=ormp.fetch_endpoints) -> dict
             "baseline": adv.baseline and {"id": adv.baseline.model.id, "quality": adv.baseline.quality,
                                           "monthly": adv.monthly(adv.baseline.cost)},
             "main": adv.main, "caps": {"max_in": max_in, "max_out": max_out, "budget": num("budget")},
+            "excluded_authors": list(excl),
             "picks": [{"role": r, "why": why, **offer(o)} for r, o, why in adv.picks]})
-    return {"tasks": out, "negligible": ormp.NEGLIGIBLE_USD}
+    media_out = []
+    mb = body.get("media")
+    if mb:
+        v = mb.get("video") or {}
+        built = state.media_models(v.get("resolution") or "1080p", bool(v.get("audio")))
+        media_out = [media_advice_json(built[k], k, mb.get(k) or {}) for k in media.KINDS if k in mb]
+    return {"tasks": out, "media": media_out, "negligible": ormp.NEGLIGIBLE_USD,
+            "watermark_authors": list(ormp.WATERMARK_AUTHORS)}
+
+
+def _num(d: dict, k: str):
+    v = d.get(k)
+    return float(v) if v not in (None, "") else None
+
+
+def media_model_json(m: media.MediaModel, per_month: float) -> dict:
+    return {"id": m.id, "name": m.name, "unit_cost": m.unit_cost,
+            "monthly": None if m.unit_cost is None else m.unit_cost * per_month,
+            "provider": m.provider, "tag": m.tag, "estimated": m.estimated, "note": m.note,
+            "elo": m.elo, "quality": m.quality, "special": m.special,
+            "providers": [{**p, "monthly": None if p["cost"] is None else p["cost"] * per_month}
+                          for p in m.providers]}
+
+
+def media_advice_json(models: list[media.MediaModel], kind: str, opts: dict) -> dict:
+    per_month = _num(opts, "per_month") or media.KINDS[kind]["per_month"]
+    cap = _num(opts, "cap")
+    adv = media.advise(models, per_month, cap)
+    return {"kind": kind, **media.KINDS[kind], "per_month": per_month, "cap": cap, "main": adv.main,
+            "has_quality": adv.has_quality,
+            "picks": [{"role": r, "why": why, **media_model_json(m, per_month)} for r, m, why in adv.picks]}
+
+
+def media_json(state: State, body: dict) -> dict:
+    kind = body.get("kind", "image")
+    ms = state.media_models(body.get("resolution") or "1080p", bool(body.get("audio")))[kind]
+    per_month = _num(body, "per_month") or media.KINDS[kind]["per_month"]
+    rows = sorted(ms, key=lambda m: (m.unit_cost is None, m.unit_cost or 0))
+    return {"rows": [media_model_json(m, per_month) for m in rows],
+            "advice": media_advice_json(ms, kind, body)}
 
 
 def rank_json(state: State, body: dict) -> dict:
@@ -170,11 +223,12 @@ def rank_json(state: State, body: dict) -> dict:
         per_unit = budget / per_month
         caps["max_cost"] = per_unit if caps["max_cost"] is None else min(caps["max_cost"], per_unit)
     min_cov = float(body.get("min_coverage", 0.5))
-    rows = ormp.rank(state.models, t, min_cov, bool(body.get("include_free")), **caps)
+    excl = tuple(body.get("exclude_authors") or ())
+    rows = ormp.rank(state.models, t, min_cov, bool(body.get("include_free")), **caps, exclude_authors=excl)
     front = {r.model.id for r in ormp.pareto(rows)}
     # Models hidden only by the coverage threshold: shown on request, never recommended.
     ranked = {r.model.id for r in rows}
-    low = [r for r in ormp.rank(state.models, t, 0.0, bool(body.get("include_free")), **caps)
+    low = [r for r in ormp.rank(state.models, t, 0.0, bool(body.get("include_free")), **caps, exclude_authors=excl)
            if r.model.id not in ranked]
 
     def row_json(r):
@@ -248,6 +302,8 @@ def make_handler(state: State, port: int):
                     self._json(rank_json(state, body))
                 elif path == "/api/providers":
                     self._json(providers_json(body))
+                elif path == "/api/media":
+                    self._json(media_json(state, body))
                 elif path == "/api/recommend":
                     self._json(recommend_json(state, body))
                 elif path == "/api/providers_many":

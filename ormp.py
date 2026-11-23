@@ -31,7 +31,13 @@ BENCH_QUERIES = {
     "da_coding": {"source": "design-arena", "task_type": "coding"},
     "or": {"source": "openrouter"},
     "search": {"task_type": "search"},
+    # Design Arena image and video arenas, used by media.py (images / video quality)
+    "da_image": {"source": "design-arena", "category": "image"},
+    "da_video": {"source": "design-arena", "category": "video"},
 }
+
+MEDIA_BENCH = ("da_image", "da_video")
+LAST_BENCH: dict = {}  # raw benchmark responses of the last load(), for media.py
 
 # Metric -> human label. Every metric is turned into a percentile (0-100) inside the pool.
 METRICS = {
@@ -215,10 +221,12 @@ def attach_benchmarks(models: list[Model], index: dict[str, Model], bench: dict[
         "aa_legal": "legal_index",
     }
     citations = []
-    for resp in bench.values():
+    for name, resp in bench.items():
         meta = resp.get("meta") or {}
         if meta.get("citation") and meta["citation"] not in citations:
             citations.append(meta["citation"])
+        if name in MEDIA_BENCH:
+            continue  # image/video arenas: read by media.py, not text quality
         for it in resp.get("data", []):
             slug, src = it.get("model_permaslug"), it.get("source")
             if not slug:
@@ -277,9 +285,15 @@ def within_limits(m: Model, t: Task, max_cost: float | None = None, max_in: floa
             and (max_out is None or m.price_out * 1e6 <= max_out))
 
 
+# Authors whose models may watermark their text: Google ships SynthID-Text; OpenAI and
+# Anthropic have not announced text watermarks, but the user asked to exclude them too
+# ("potentially"). Applied only when requested (rewriting documents).
+WATERMARK_AUTHORS = ("google", "openai", "anthropic")
+
+
 def rank(models: list[Model], t: Task, min_coverage: float = 0.5, include_free: bool = False,
          min_context: int | None = None, max_cost: float | None = None, max_in: float | None = None,
-         max_out: float | None = None) -> list[Row]:
+         max_out: float | None = None, exclude_authors: tuple[str, ...] = ()) -> list[Row]:
     """Score each model for the task. quality = weighted mean of the percentiles it has;
     coverage = share of the task's weight it has data for. Percentiles are computed over
     the whole catalog, so price caps remove models without changing anyone's score."""
@@ -289,6 +303,8 @@ def rank(models: list[Model], t: Task, min_coverage: float = 0.5, include_free: 
         if m.context < min_ctx or (m.free and not include_free) or m.id.endswith(":batch"):
             continue  # :batch = asynchronous batch API, not usable interactively
         if not within_limits(m, t, max_cost, max_in, max_out):
+            continue
+        if m.id.split("/")[0] in exclude_authors:
             continue
         avail = {k: w for k, w in t.weights.items() if k in m.pct}
         cov = sum(avail.values()) / sum(t.weights.values())
@@ -452,7 +468,7 @@ class Advice:
 def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None = None,
            per_month: float | None = None, negligible: float = NEGLIGIBLE_USD,
            min_coverage: float = 0.5, max_in: float | None = None, max_out: float | None = None,
-           budget: float | None = None) -> Advice:
+           budget: float | None = None, exclude_authors: tuple[str, ...] = ()) -> Advice:
     """The recommendation algorithm, per task:
     1. Rank models (benchmarks, coverage >= min_coverage, no :free) and price each one with
        its cheapest reliable provider (see `reliable`).
@@ -466,7 +482,7 @@ def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None 
     Price caps: providers above max_in/max_out (USD per million tokens) are ignored, and
     offers above `budget` USD a month are dropped; the routing snippet carries the caps."""
     per_month = per_month or DEFAULT_PER_MONTH.get(t.key, 100)
-    rows = rank(models, t, min_coverage)
+    rows = rank(models, t, min_coverage, exclude_authors=exclude_authors)
 
     def offer_for(r):
         o = best_offer(r, t, endpoints_for, max_in, max_out)
@@ -548,7 +564,8 @@ def print_table(rows: list[Row], t: Task, limit: int, mark: set[str] = frozenset
 
 def show_task(models, t: Task, opts) -> list[Row]:
     rows = rank(models, t, opts.min_coverage, opts.include_free,
-                max_cost=opts.max_cost, max_in=opts.max_in, max_out=opts.max_out)
+                max_cost=opts.max_cost, max_in=opts.max_in, max_out=opts.max_out,
+                exclude_authors=WATERMARK_AUTHORS if (getattr(opts, "no_watermark", False) and t.key == "rewrite") else ())
     limited = any(x is not None for x in (opts.max_cost, opts.max_in, opts.max_out))
     front = pareto(rows)
     print(f"\n{BOLD}{CYAN}== {t.name} =={RESET}  perfil por {t.unit}: {t.tokens_in:,} tokens entrada "
@@ -590,7 +607,11 @@ def print_advice(models, opts) -> None:
     total_now = total_new = 0.0
     for t in TASKS.values():
         pm = opts.per_month if (opts.per_month and t.key == "coding") else None
-        adv = advise(models, t, fetch_endpoints, opts.baseline, pm, max_in=opts.max_in, max_out=opts.max_out)
+        excl = WATERMARK_AUTHORS if (opts.no_watermark and t.key == "rewrite") else ()
+        adv = advise(models, t, fetch_endpoints, opts.baseline, pm, max_in=opts.max_in, max_out=opts.max_out,
+                     exclude_authors=excl)
+        if excl:
+            print(DIM + "Sin modelos con posible marca de agua: " + ", ".join(excl) + RESET)
         print(f"\n{BOLD}{CYAN}== {t.name} =={RESET}  ({adv.per_month:,.0f} {t.units}/mes)")
         if adv.baseline:
             now = adv.monthly(adv.baseline.cost)
@@ -666,6 +687,8 @@ def load(key: str | None, refresh: bool) -> tuple[list[Model], list[str]]:
                 if e.code == 401:
                     break
     citations = attach_benchmarks(models, index, bench)
+    LAST_BENCH.clear()
+    LAST_BENCH.update(bench)
     percentiles(models)
     n = sum(1 for m in models if m.metrics)
     print(DIM + f"{len(models)} modelos en el catálogo, {n} con benchmarks." + RESET)
@@ -735,6 +758,8 @@ def main(argv=None) -> None:
     ap.add_argument("--limit", type=int, default=15)
     ap.add_argument("--max-cost", type=float, help="precio máximo por tarea (USD)")
     ap.add_argument("--baseline", help="tu modelo actual, p. ej. deepseek/deepseek-v4.1-flash-1017")
+    ap.add_argument("--no-watermark", action="store_true",
+                    help="reescribir: excluye modelos con posible marca de agua (Google/SynthID, OpenAI, Anthropic)")
     ap.add_argument("--per-month", type=float, help="tareas (u horas de sesión en coding) al mes")
     ap.add_argument("--max-in", type=float, help="precio máximo de entrada (USD por millón de tokens)")
     ap.add_argument("--max-out", type=float, help="precio máximo de salida (USD por millón de tokens)")

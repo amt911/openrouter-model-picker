@@ -126,6 +126,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
         <label>Contexto mínimo <input id="ctx" type="number" min="0" step="8000"></label>
         <label>Cobertura mínima <span><input id="cov" type="range" min="0" max="1" step="0.05" value="0.5"> <b id="covv">50%</b></span></label>
         <label class="inline"><input id="free" type="checkbox"> Incluir gratis (:free, con límites)</label>
+        <label class="inline" id="wmBox" title="Google marca el texto de Gemini con SynthID-Text. OpenAI y Anthropic no han anunciado marcas de agua en texto, pero se quitan por precaución."><input id="noWm" type="checkbox"> Quitar modelos con posible marca de agua (SynthID de Google, y por precaución OpenAI y Anthropic)</label>
         <button id="reset" class="ghost">Valores por defecto</button>
       </div>
       <div class="controls limits">
@@ -202,6 +203,23 @@ footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
     <div id="recOut"></div>
   </section>
 
+  <section id="mediaView" class="hidden">
+    <div class="panel">
+      <div class="controls">
+        <label><span><span class="munits"></span> al mes</span> <input id="mPerMonth" type="number" min="0" step="10"></label>
+        <label><span>Máx. $ por <span class="munit"></span></span> <input id="mCap" type="number" min="0" step="0.001" placeholder="sin límite"></label>
+        <label id="mResBox">Resolución <select id="mRes"><option>480p</option><option>720p</option><option selected>1080p</option><option>2K</option><option>4K</option></select></label>
+        <label class="inline" id="mAudioBox"><input id="mAudio" type="checkbox"> con audio</label>
+      </div>
+      <p class="note" id="mNote"></p>
+    </div>
+    <div class="recs" id="mRecs"></div>
+    <div class="panel">
+      <div class="tablebar"><b id="mCount"></b><input id="mFilter" type="text" placeholder="filtrar modelo…"></div>
+      <div class="scroll"><table id="mTable"></table></div>
+    </div>
+  </section>
+
   <section id="compareView" class="hidden">
     <div class="panel">
       <div class="controls">
@@ -254,7 +272,8 @@ function setState(s) {
   $("#nokey").classList.toggle("hidden", s.has_key && s.n_bench > 0);
   if (s.has_key && s.n_bench === 0) $("#nokey").textContent = "La key se aceptó pero no llegó ningún benchmark: revisa la key o la terminal.";
   $("#cites").textContent = s.citations.join(" · ");
-  const tabs = [["rec", "★ Recomendación"]].concat(Object.entries(s.tasks).map(([k, t]) => [k, t.name]), [["compare", "Comparar modelos"]]);
+  const tabs = [["rec", "★ Recomendación"]].concat(Object.entries(s.tasks).map(([k, t]) => [k, t.name]),
+    Object.entries(MEDIA).map(([k, m]) => [k, m.name]), [["compare", "Comparar modelos"]]);
   $("#tabs").innerHTML = tabs.map(([k, n]) => `<button data-t="${k}" class="${k === task ? "on" : ""}">${esc(n)}</button>`).join("");
   $("#tabs").querySelectorAll("button").forEach(b => b.onclick = () => show(b.dataset.t));
   api("/api/ids").then(ids => $("#ids").innerHTML = ids.map(i => `<option value="${esc(i)}">`).join(""));
@@ -273,14 +292,17 @@ function controls(task_ = task) {
     min_context: p.min_context ?? t.min_context, min_coverage: p.min_coverage ?? 0.5, include_free: p.include_free ?? false,
     max_cost: per(limits.max_cost, task), max_in: per(limits.max_in, task), max_out: per(limits.max_out, task),
     budget: per(limits.budget, task), baseline: usage.baseline || null, spend: per(usage.spend, task),
+    exclude_authors: task === "rewrite" && usage.no_watermark ? S.watermark_authors : [],
     per_month: task === "coding" ? sessionHours() : per(usage.units, task)};
 }
 
 function show(t) {
   task = t;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
-  const isCmp = t === "compare", isRec = t === "rec";
-  $("#taskView").classList.toggle("hidden", isCmp || isRec);
+  const isCmp = t === "compare", isRec = t === "rec", isMedia = t in MEDIA;
+  $("#taskView").classList.toggle("hidden", isCmp || isRec || isMedia);
+  $("#mediaView").classList.toggle("hidden", !isMedia);
+  if (isMedia) return mediaShow(t);
   $("#compareView").classList.toggle("hidden", !isCmp);
   $("#recView").classList.toggle("hidden", !isRec);
   if (isCmp) return compare();
@@ -292,6 +314,7 @@ function show(t) {
   $("#cache").value = c.cache_hit; $("#cachev").textContent = Math.round(c.cache_hit * 100) + "%";
   $("#cov").value = c.min_coverage; $("#covv").textContent = Math.round(c.min_coverage * 100) + "%";
   $("#free").checked = c.include_free;
+  $("#wmBox").classList.toggle("hidden", t !== "rewrite"); $("#noWm").checked = !!usage.no_watermark;
   for (const [id, v] of [["#maxCost", c.max_cost], ["#maxIn", c.max_in], ["#maxOut", c.max_out], ["#budget", c.budget]]) {
     $(id).value = v ?? ""; $(id).classList.toggle("active", v != null);
   }
@@ -543,6 +566,69 @@ async function providers(id) {
       <td>${p.tools ? "✓" : '<span class="neg">✗</span>'}</td></tr>`).join("") + "</tbody>";
 }
 
+// ---- images / video / transcription
+const MEDIA = {
+  image: {name: "Imágenes", unit: "imagen", units: "imágenes", per_month: 100, step: 0.001,
+    note: "Precio por imagen de ~1024×1024 con el proveedor más barato. ≈ = estimado (cobran por tokens; se asumen 1290 por imagen). Calidad: Design Arena (arena de imágenes), si tu API key la trae."},
+  video: {name: "Vídeo", unit: "segundo de vídeo", units: "segundos de vídeo", per_month: 60, step: 0.01,
+    note: "Precio por segundo a la resolución elegida. ≈ = estimado (Seedance cobra por tokens). Los avatares que hablan (HeyGen) salen en la tabla pero no se recomiendan. Calidad: Design Arena (arena de vídeo), si tu API key la trae."},
+  transcription: {name: "Transcripción", unit: "minuto de audio", units: "minutos de audio", per_month: 600, step: 0.0001,
+    note: "Precio por minuto de audio con el proveedor más barato. OpenRouter no publica benchmarks de transcripción: se ordena solo por precio, prueba los baratos con tus audios. Los que cobran por tokens o con unidad poco clara salen sin precio comparable."},
+};
+const mediaOpts = k => ({kind: k, per_month: per(usage.units, k) ?? MEDIA[k].per_month, cap: per(limits.cap, k),
+  ...(k === "video" ? {resolution: usage.video_res || "1080p", audio: !!usage.video_audio} : {})});
+const ROLE_M = {ahorro: "Ahorro", calidad: "Calidad", mas_barato: "Más barato"};
+const mm$ = v => v == null ? "–" : v === 0 ? "gratis" : v < 0.01 ? "$" + v.toFixed(4) : v < 100 ? "$" + v.toFixed(2) : "$" + int(v);
+function mediaCard(p, adv, withSnippet = true) {
+  return `<div class="pick ${p.role === adv.main ? "main" : ""}">
+    <div class="role">${p.role === adv.main ? "► Recomendado · " : ""}${ROLE_M[p.role] || p.role}</div>
+    <div class="id">${esc(p.id)}</div>
+    <div>${p.provider ? `vía <b>${esc(p.provider)}</b>` : ""}${p.estimated ? ' <span class="tag" title="' + esc(p.note) + '">≈ estimado</span>' : ""}</div>
+    <div class="nums">${p.quality != null ? `calidad <b>${p.quality.toFixed(1)}</b> (ELO ${Math.round(p.elo)}) · ` : ""}${mm$(p.unit_cost)} por ${esc(adv.unit)} · <b>${mm$(p.monthly)}</b>/mes</div>
+    <div class="why">${esc(p.why)}</div>
+    ${withSnippet && p.tag ? `<pre class="snip">${esc('"provider": ' + JSON.stringify({order: [p.tag], allow_fallbacks: true}))}</pre>` : ""}</div>`;
+}
+let mSeq = 0, mRows = [], mOpen = new Set();
+async function mediaShow(k) {
+  const m = MEDIA[k], o = mediaOpts(k), seq = ++mSeq;
+  document.querySelectorAll(".munit").forEach(e => e.textContent = m.unit);
+  document.querySelectorAll(".munits").forEach(e => e.textContent = m.units);
+  $("#mPerMonth").value = o.per_month; $("#mCap").value = o.cap ?? ""; $("#mCap").step = m.step;
+  $("#mCap").classList.toggle("active", o.cap != null);
+  $("#mResBox").classList.toggle("hidden", k !== "video"); $("#mAudioBox").classList.toggle("hidden", k !== "video");
+  $("#mRes").value = usage.video_res || "1080p"; $("#mAudio").checked = !!usage.video_audio;
+  $("#mNote").textContent = m.note;
+  $("#mRecs").innerHTML = `<div class="panel muted">Cargando catálogo de OpenRouter (unos segundos la primera vez)…</div>`;
+  let d;
+  try { d = await api("/api/media", o); } catch (e) { $("#mRecs").innerHTML = `<div class="banner">Error: ${esc(e.message)}</div>`; return; }
+  if (seq !== mSeq) return;
+  mRows = d.rows;
+  const adv = d.advice;
+  $("#mRecs").innerHTML = adv.picks.length ? adv.picks.map(p => mediaCard(p, adv)).join("")
+    : `<div class="banner">Ningún modelo cabe en tu límite de precio.</div>`;
+  mediaTable();
+}
+function mediaTable() {
+  const k = task, f = $("#mFilter").value.toLowerCase();
+  const rs = mRows.filter(r => !f || r.id.toLowerCase().includes(f));
+  $("#mCount").textContent = `${rs.length} modelos · clic en uno para ver todos sus proveedores`;
+  $("#mTable").innerHTML = `<thead><tr><th>modelo</th><th>proveedor más barato</th><th>$/${esc(MEDIA[k].unit)}</th><th>$/mes</th>
+      <th>calidad</th><th>ELO</th><th>proveedores</th><th>nota</th></tr></thead><tbody>` +
+    rs.map(r => `<tr data-id="${esc(r.id)}" class="${r.special ? "low" : ""}"><td>${esc(r.id)}</td><td>${esc(r.provider || "–")}</td>
+      <td>${mm$(r.unit_cost)}${r.estimated ? " ≈" : ""}</td><td>${mm$(r.monthly)}</td>
+      <td>${r.quality == null ? '<span class="muted">–</span>' : r.quality.toFixed(1)}</td><td>${r.elo == null ? '<span class="muted">–</span>' : Math.round(r.elo)}</td>
+      <td>${r.providers.length || "–"}</td><td class="sub">${esc(r.note || "")}</td></tr>` +
+      (mOpen.has(r.id) ? r.providers.map(p => `<tr class="low"><td class="sub">↳</td><td>${esc(p.provider || "–")} <span class="muted">${esc(p.tag || "")}</span></td>
+        <td>${mm$(p.cost)}${p.estimated ? " ≈" : ""}</td><td>${mm$(p.monthly)}</td><td colspan="3"></td><td class="sub">${esc(p.note || "")}</td></tr>`).join("") : "")).join("") + "</tbody>";
+  $("#mTable").querySelectorAll("tbody tr[data-id]").forEach(tr => tr.onclick = () => {
+    const id = tr.dataset.id; mOpen.has(id) ? mOpen.delete(id) : mOpen.add(id); mediaTable(); });
+}
+$("#mFilter").oninput = mediaTable;
+$("#mPerMonth").addEventListener("change", () => { usage.units = {...(usage.units || {}), [task]: num($("#mPerMonth").value)}; saveUsage(); mediaShow(task); });
+$("#mCap").addEventListener("change", () => { limits.cap = {...(limits.cap || {}), [task]: num($("#mCap").value)}; saveLimits(); mediaShow(task); });
+$("#mRes").addEventListener("change", () => { usage.video_res = $("#mRes").value; saveUsage(); mediaShow(task); });
+$("#mAudio").addEventListener("change", () => { usage.video_audio = $("#mAudio").checked; saveUsage(); mediaShow(task); });
+
 let recSeq = 0;
 async function recommend() {
   const seq = ++recSeq, out = $("#recOut");
@@ -550,7 +636,8 @@ async function recommend() {
   out.innerHTML = `<div class="panel muted">Calculando: descargando proveedores de OpenRouter (unos segundos la primera vez)…</div>`;
   const tasks = Object.fromEntries(Object.keys(S.tasks).map(k => [k, controls(k)]));
   let d;
-  try { d = await api("/api/recommend", {baseline: usage.baseline || null, tasks}); }
+  const mediaBody = Object.fromEntries(Object.keys(MEDIA).map(k => [k, mediaOpts(k)]));
+  try { d = await api("/api/recommend", {baseline: usage.baseline || null, tasks, media: mediaBody}); }
   catch (e) { out.innerHTML = `<div class="banner">Error: ${esc(e.message)}</div>`; return; }
   if (seq !== recSeq) return;
   $("#negl").textContent = "$" + d.negligible;
@@ -574,19 +661,29 @@ async function recommend() {
           <button class="ghost copy" data-c="${esc('"provider": ' + JSON.stringify(p.routing, null, 2))}">copiar</button>` : ""}
       </div>`;
     const caps = [t.caps.max_in != null && `entrada ≤ $${t.caps.max_in}/M`, t.caps.max_out != null && `salida ≤ $${t.caps.max_out}/M`,
-      t.caps.budget != null && `presupuesto ≤ $${t.caps.budget}/mes`].filter(Boolean);
+      t.caps.budget != null && `presupuesto ≤ $${t.caps.budget}/mes`,
+      (t.excluded_authors || []).length && `sin ${t.excluded_authors.join(", ")}`].filter(Boolean);
+    const wm = t.task === "rewrite" ? `<label class="inline muted" title="Google marca el texto de Gemini con SynthID-Text; OpenAI y Anthropic se quitan por precaución">
+        <input type="checkbox" class="wmrec" ${usage.no_watermark ? "checked" : ""}> sin posible marca de agua (Google, OpenAI, Anthropic)</label>` : "";
     const capIn = (k, v, step) => `<input class="cap" data-task="${t.task}" data-k="${k}" type="number" min="0" step="${step}" placeholder="sin límite" value="${v ?? ""}">`;
     return `<div class="panel"><div class="tablebar"><b>${esc(t.name)}${caps.length ? ` <span class="tag">${esc(caps.join(" · "))}</span>` : ""}</b>
         <span class="controls capbox" title="max_price de OpenRouter para esta sección: ningún proveedor por encima de esto">
           <label>Price cap entrada $/M ${capIn("max_in", t.caps.max_in, 0.01)}</label>
-          <label>Price cap salida $/M ${capIn("max_out", t.caps.max_out, 0.05)}</label></span></div>
+          <label>Price cap salida $/M ${capIn("max_out", t.caps.max_out, 0.05)}</label>${wm}</span></div>
       <div class="tablebar">
         <span class="muted">${int(t.per_month)} ${esc(t.units)}/mes${t.baseline ? ` · ahora: ${esc(t.baseline.id)}, calidad ${t.baseline.quality.toFixed(1)}, ${m$(t.baseline.monthly)}/mes` : ""}</span></div>
       ${t.picks.length ? `<div class="recgrid">${t.picks.map(pick).join("")}</div>` : `<div class="banner">${caps.length ? "Ningún proveedor fiable cabe en tu price cap o presupuesto de esta sección: súbelo." : "Sin recomendación: faltan benchmarks o proveedores fiables (¿has puesto la API key?)."}</div>`}</div>`;
   }).join("");
-  out.innerHTML = (anyBase ? `<div class="panel total">Total: <b>${m$(now)}/mes</b> ahora → <b>${m$(rec)}/mes</b> con lo recomendado
+  const mediaHtml = (d.media || []).map(adv => {
+    return `<div class="panel"><div class="tablebar"><b>${esc(adv.name)}${adv.cap != null ? ` <span class="tag">≤ ${mm$(adv.cap)} por ${esc(adv.unit)}</span>` : ""}</b>
+        <span class="muted">${int(adv.per_month)} ${esc(adv.units)}/mes${adv.has_quality ? "" : " · sin benchmarks de calidad: solo precio"} · ajústalo en su pestaña</span></div>
+      ${adv.picks.length ? `<div class="recgrid">${adv.picks.map(p => mediaCard(p, adv)).join("")}</div>` : `<div class="banner">Nada cabe en tu límite de precio.</div>`}</div>`;
+  }).join("");
+  out.innerHTML = (anyBase ? `<div class="panel total">Total en texto (programar, reescribir, papers): <b>${m$(now)}/mes</b> ahora → <b>${m$(rec)}/mes</b> con lo recomendado
       <span class="${rec <= now ? "pos" : "neg"}">(${rec / now - 1 >= 0 ? "+" : ""}${Math.round((rec / now - 1) * 100)}%)</span></div>`
-    : `<div class="panel muted">Pon tu modelo actual arriba para ver cuánto ahorras frente a lo que usas hoy.</div>`) + html;
+    : `<div class="panel muted">Pon tu modelo actual arriba para ver cuánto ahorras frente a lo que usas hoy.</div>`) + html + mediaHtml;
+  out.querySelectorAll("input.wmrec").forEach(cb => cb.addEventListener("change", () => {
+    usage.no_watermark = cb.checked; saveUsage(); recommend(); }));
   out.querySelectorAll("input.cap").forEach(inp => inp.addEventListener("change", () => {
     limits[inp.dataset.k] = {...(limits[inp.dataset.k] || {}), [inp.dataset.task]: num(inp.value)}; saveLimits(); recommend();
   }));
@@ -631,6 +728,7 @@ bindControl("#ctx", "min_context", e => +e.value || 0);
 bindControl("#cov", "min_coverage", e => +e.value);
 bindControl("#free", "include_free", e => e.checked);
 $("#reset").onclick = () => { delete prefs[task]; show(task); };
+$("#noWm").addEventListener("change", () => { usage.no_watermark = $("#noWm").checked; saveUsage(); rank(); });
 function bindStored(id, set, save, mark = true) {
   $(id).addEventListener("input", () => {
     set(num($(id).value)); save();

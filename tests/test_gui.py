@@ -131,6 +131,11 @@ class GuiApi(unittest.TestCase):
         pa = d["tasks"][1]
         self.assertAlmostEqual(pa["baseline"]["monthly"], 50)  # calibrated from the real bill
 
+    def test_rank_excludes_authors(self):
+        st, body = self.req("POST", "/api/rank", {"task": "rewrite", "exclude_authors": ["a"]})
+        ids = [r["id"] for r in json.loads(body)["rows"]] + [r["id"] for r in json.loads(body)["low_coverage"]]
+        self.assertFalse(any(i.startswith("a/") for i in ids))
+
     def test_compare(self):
         st, body = self.req("GET", "/api/models?q=big")
         self.assertEqual({m["id"] for m in json.loads(body)}, {"a/big", "a/big:free", "a/big:batch"})

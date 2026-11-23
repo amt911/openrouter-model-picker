@@ -21,6 +21,28 @@ python3 ormp.py --gui                 # interfaz gráfica en el navegador
 python3 ormp.py                       # menú interactivo en la terminal
 ```
 
+### Imágenes, vídeo y transcripción
+
+Pestañas **Imágenes**, **Vídeo** y **Transcripción** (y también en la Recomendación). OpenRouter
+los lista aparte (`/images/models`, `/videos/models`, `/models?output_modalities=transcription`) y
+cobra en unidades distintas, así que todo se pasa a una unidad comparable:
+
+| | Unidad | Calidad |
+|---|---|---|
+| Imágenes | $ por imagen de ~1024×1024 (por imagen, megapíxel o tokens; ≈ si es estimado) | ELO de Design Arena (arena de imágenes) |
+| Vídeo | $ por segundo a la resolución elegida, con o sin audio | ELO de Design Arena (arena de vídeo) |
+| Transcripción | $ por minuto de audio | OpenRouter no publica benchmarks: solo precio |
+
+Se usa el proveedor más barato de cada modelo. Los precios que no se pueden convertir con
+honestidad (por tokens sin equivalencia, unidad poco clara) salen sin precio y no se recomiendan;
+tampoco los avatares que hablan ni los panoramas 360°.
+
+### Marca de agua al reescribir
+
+En «Reescribir documentos» (y en su sección de la Recomendación) hay un check para quitar los
+modelos con posible marca de agua en el texto: Google (SynthID-Text) y, por precaución, OpenAI y
+Anthropic, que no han anunciado marcas en texto. En la terminal: `--no-watermark`.
+
 ### Recomendación automática
 
 Pestaña **★ Recomendación** en la GUI, o `python3 ormp.py --recommend --baseline <tu modelo> --per-month <horas de sesión>`
