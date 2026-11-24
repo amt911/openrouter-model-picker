@@ -288,9 +288,9 @@ def within_limits(m: Model, t: Task, max_cost: float | None = None, max_in: floa
 # Authors whose models watermark (or can watermark) their text, as of November 2026:
 # Google (SynthID-Text on the Gemini API), Anthropic (model-level, derived from SynthID-Text,
 # no opt-out), OpenAI (textGrain: ChatGPT/Codex in the EU, opt-in on the API) and xAI (Grok
-# 4.x). Meta watermarks Muse images (Content Seal) but no text watermark is confirmed.
-# Applied only when requested (rewriting documents).
-WATERMARK_AUTHORS = ("google", "openai", "anthropic", "x-ai")
+# 4.x). Meta (Muse) too, as a precaution: it watermarks Muse images (Content Seal) and a text
+# watermark is not ruled out. Applied only when requested (rewriting documents).
+WATERMARK_AUTHORS = ("google", "openai", "anthropic", "x-ai", "meta")
 
 
 def rank(models: list[Model], t: Task, min_coverage: float = 0.5, include_free: bool = False,
@@ -408,10 +408,11 @@ DEFAULT_PER_MONTH = {"coding": 176, "rewrite": 100, "papers": 100}  # 1 session 
 
 
 def reliable(e: Endpoint, t: Task) -> bool:
-    """Provider good enough to recommend: uptime >= 99% over 24 h, not 4-bit, and with tool
-    calling when the task is coding (agents need it)."""
+    """Provider good enough to recommend: uptime >= 99% over 24 h, not 4-bit, and, when the
+    task is coding, with tool calling (agents need it) and not the "flex" tier (a low-priority
+    queue: slower and refused under load, which an interactive agent cannot wait out)."""
     return ((e.uptime_1d or 0) >= 99 and not re.search(r"(fp|int)4", e.quantization or "")
-            and (t.key != "coding" or e.tools))
+            and (t.key != "coding" or (e.tools and e.tier != "flex")))
 
 
 @dataclass
@@ -474,13 +475,16 @@ def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None 
     """The recommendation algorithm, per task:
     1. Rank models (benchmarks, coverage >= min_coverage, no :free) and price each one with
        its cheapest reliable provider (see `reliable`).
-    2. Candidates: "ahorro" = your own model with that provider; "mejora" = the best model
-       that beats yours and costs less than you pay today; "calidad" = the cheapest model
-       reaching 90% of the best quality available; without a current model, "equilibrio" =
-       the cheapest one reaching 75%.
+    2. Candidates: "ahorro" = your own model with that provider, when it saves >= 5% on the
+       catalog price, else "tu_modelo" = the same, saying why it costs more (the catalog price
+       often comes from a provider that fails `reliable`); "mejora" = the best model that beats
+       yours and costs less than you pay today, or else the cheapest model that beats yours;
+       "calidad" = the cheapest model reaching 90% of the best quality available; without a
+       current model, "equilibrio" = the cheapest one reaching 75%.
     3. Pick: if "calidad" costs under `negligible` USD a month at your volume, quality wins
-       (saving cents is not worth worse answers); otherwise the saving on your own model,
-       then the upgrade, then the balance.
+       (saving cents is not worth worse answers); otherwise the saving, then a cheaper upgrade,
+       then your own model, then a dearer upgrade, then the balance. "calidad" wins only then
+       or when nothing else is left.
     Price caps: providers above max_in/max_out (USD per million tokens) are ignored, and
     offers above `budget` USD a month are dropped; the routing snippet carries the caps."""
     per_month = per_month or DEFAULT_PER_MONTH.get(t.key, 100)
@@ -503,22 +507,33 @@ def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None 
     def cheapest_reaching(frac):
         return next((o for o in front if o.row.quality >= frac * top), None)
 
+    q = cheapest_reaching(0.9)
     b = adv.baseline
+    order = ["ahorro", "mejora", "tu_modelo", "equilibrio", "calidad"]
     if b:
         mine = offer_for(b)
         if mine and mine.endpoint and mine.cost < b.cost * 0.95:
             adv.picks.append(("ahorro", mine, "Tu mismo modelo con el proveedor fiable más barato: mismos "
                               f"resultados, {(1 - mine.cost / b.cost) * 100:.0f}% menos que el precio de catálogo."))
-        better = [o for o in offers if o.row.quality > b.quality and o.cost < b.cost and o.row.model.id != b.model.id]
+        elif mine:
+            adv.picks.append(("tu_modelo", mine, own_model_why(b, mine, t, endpoints_for, max_in, max_out)))
+        mejores = [o for o in offers if o.row.quality > b.quality and o.row.model.id != b.model.id]
+        better = [o for o in mejores if o.cost < b.cost]
         if better:
             up = max(better, key=lambda o: (o.row.quality, -o.cost))
             adv.picks.append(("mejora", up, f"Mejor que tu modelo (+{up.row.quality - b.quality:.1f} de calidad) y "
                               f"más barato que el precio de catálogo del tuyo ({(up.cost / b.cost - 1) * 100:+.0f}%)."))
+        elif mejores:
+            # nothing better is cheaper: the cheapest step up, never preferred to your own model
+            up = min(mejores, key=lambda o: (o.cost, -o.row.quality))
+            if not q or (up.row.model.id, up.endpoint and up.endpoint.tag) != (q.row.model.id, q.endpoint and q.endpoint.tag):
+                adv.picks.append(("mejora", up, f"El más barato que supera tu calidad (+{up.row.quality - b.quality:.1f}); "
+                                  f"ninguno mejor cuesta menos que tu precio de catálogo ({(up.cost / b.cost - 1) * 100:+.0f}%)."))
+                order = ["ahorro", "tu_modelo", "mejora", "equilibrio", "calidad"]
     else:
         bal = cheapest_reaching(0.75)
         if bal:
             adv.picks.append(("equilibrio", bal, "El más barato con al menos el 75% de la mejor calidad disponible."))
-    q = cheapest_reaching(0.9)
     if q:
         adv.picks.append(("calidad", q, "El más barato con al menos el 90% de la mejor calidad disponible."))
     # the same model and provider twice is one pick: keep the first role
@@ -533,8 +548,45 @@ def advise(models: list[Model], t: Task, endpoints_for, baseline_id: str | None 
     if "calidad" in roles and adv.monthly(roles["calidad"].cost) <= negligible:
         adv.main = "calidad"
     else:
-        adv.main = next((r for r in ("ahorro", "mejora", "equilibrio", "calidad") if r in roles), None)
+        adv.main = next((r for r in order if r in roles), None)
     return adv
+
+
+def rejected_because(e: Endpoint, t: Task, max_in: float | None, max_out: float | None) -> str:
+    """Why `reliable` or the price caps leave a provider out, in words."""
+    why = []
+    if (e.uptime_1d or 0) < 99:
+        why.append(f"uptime 24 h {e.uptime_1d:.1f}%" if e.uptime_1d is not None else "sin datos de uptime")
+    if re.search(r"(fp|int)4", e.quantization or ""):
+        why.append(f"cuantización {e.quantization}")
+    if t.key == "coding" and not e.tools:
+        why.append("sin herramientas")
+    if t.key == "coding" and e.tier == "flex":
+        why.append("nivel flex, de baja prioridad")
+    if not under_caps(e.model, max_in, max_out):
+        why.append("por encima de tu price cap")
+    return ", ".join(why)
+
+
+def own_model_why(b: Row, mine: Offer, t: Task, endpoints_for, max_in, max_out) -> str:
+    """Explains the "tu_modelo" pick: your model with its cheapest reliable provider, which
+    saves nothing over the catalog price, usually because a rejected provider sets that price."""
+    if not mine.endpoint:
+        return "Tu mismo modelo a precio de catálogo (sin datos de proveedores)."
+    head = f"Tu mismo modelo con el proveedor fiable más barato ({mine.endpoint.provider})"
+    pct = (mine.cost / b.cost - 1) * 100 if b.cost else 0
+    if pct < 0.5:
+        return head + f": cuesta casi lo mismo que el precio de catálogo ({pct:+.0f}%)."
+    try:
+        eps = parse_endpoints(endpoints_for(b.model.id))
+    except Exception:  # noqa: BLE001
+        eps = []
+    cheaper = [e for e in eps if e.model.cost(t) < mine.cost and rejected_because(e, t, max_in, max_out)]
+    if not cheaper:
+        return head + f": cuesta {pct:+.0f}% sobre el precio de catálogo."
+    c = min(cheaper, key=lambda e: e.model.cost(t))
+    return head + (f": cuesta {pct:+.0f}% sobre el precio de catálogo, que sale de {c.provider} "
+                   f"({rejected_because(c, t, max_in, max_out)}), y ese no se recomienda.")
 
 
 # ---------------------------------------------------------------- output
@@ -602,7 +654,8 @@ def show_task(models, t: Task, opts) -> list[Row]:
     return rows
 
 
-ROLE_LABEL = {"ahorro": "Ahorro", "mejora": "Mejora", "equilibrio": "Equilibrio", "calidad": "Calidad"}
+ROLE_LABEL = {"ahorro": "Ahorro", "tu_modelo": "Tu modelo (fiable)", "mejora": "Mejora", "equilibrio": "Equilibrio",
+              "calidad": "Calidad"}
 
 
 def print_advice(models, opts) -> None:
@@ -761,7 +814,7 @@ def main(argv=None) -> None:
     ap.add_argument("--max-cost", type=float, help="precio máximo por tarea (USD)")
     ap.add_argument("--baseline", help="tu modelo actual, p. ej. deepseek/deepseek-v4.1-flash-1017")
     ap.add_argument("--no-watermark", action="store_true",
-                    help="reescribir: excluye modelos con marca de agua en texto (Google, Anthropic, OpenAI, xAI)")
+                    help="reescribir: excluye modelos con marca de agua en texto (Google, Anthropic, OpenAI, xAI, Meta)")
     ap.add_argument("--per-month", type=float, help="tareas (u horas de sesión en coding) al mes")
     ap.add_argument("--max-in", type=float, help="precio máximo de entrada (USD por millón de tokens)")
     ap.add_argument("--max-out", type=float, help="precio máximo de salida (USD por millón de tokens)")

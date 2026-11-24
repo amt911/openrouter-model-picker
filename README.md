@@ -48,7 +48,7 @@ modelos cuyo texto lleva o puede llevar marca de agua (situación a noviembre de
 | Anthropic (Claude) | sí, a nivel de modelo y sin opción de quitarlo | [TechCrunch](https://techcrunch.com/2026/08/11/anthropic-says-it-will-watermark-text-generated-by-its-ai-models/) |
 | OpenAI | textGrain: ChatGPT/Codex en la UE; en la API solo si se activa | [TechCrunch](https://techcrunch.com/2026/10/05/openai-will-start-watermarking-chatgpts-text-in-the-eu/) |
 | xAI (Grok 4.x) | sí, desde el 7 de noviembre de 2026 | [Eden AI](https://www.edenai.co/post/ai-text-watermarking-llm-apis) |
-| Meta (Muse) | no confirmado: marca las **imágenes** de Muse Image (Content Seal), no el texto | [AI Chat Daily](https://www.aichatdaily.com/ai-security/meta-launches-content-seal-ai-watermarking-three-years) |
+| Meta (Muse) | se quita por precaución: marca las **imágenes** de Muse Image (Content Seal) y en texto no está descartado | [AI Chat Daily](https://www.aichatdaily.com/ai-security/meta-launches-content-seal-ai-watermarking-three-years) |
 
 En la terminal: `--no-watermark`.
 
@@ -58,11 +58,15 @@ Pestaña **★ Recomendación** en la GUI, o `python3 ormp.py --recommend --base
 en la terminal. Para cada sección:
 
 1. Puntúa los modelos con los benchmarks y busca el **proveedor fiable más barato** de cada uno
-   (uptime 24 h ≥ 99%, sin 4 bits y, para programar, con herramientas).
-2. Propone **Ahorro** (tu mismo modelo con ese proveedor), **Mejora** (el mejor que supera al tuyo y
-   cuesta menos de lo que pagas hoy) y **Calidad** (el más barato con ≥ 90% de la mejor calidad).
+   (uptime 24 h ≥ 99%, sin 4 bits y, para programar, con herramientas y sin el nivel «flex», de baja
+   prioridad: más lento y puede rechazar peticiones en picos, y un agente no puede esperar).
+2. Propone **Ahorro** (tu mismo modelo con ese proveedor; si no ahorra nada, porque el precio de
+   catálogo sale de un proveedor que no pasa el filtro, aparece como **Tu modelo (fiable)** con el
+   motivo), **Mejora** (el mejor que supera al tuyo y cuesta menos de lo que pagas hoy; si no hay,
+   el más barato que lo supera) y **Calidad** (el más barato con ≥ 90% de la mejor calidad).
 3. Elige: si «Calidad» cuesta menos de $20 al mes con tu volumen, gana la calidad (no compensa
-   ahorrar céntimos); si no, el ahorro y después la mejora.
+   ahorrar céntimos); si no, el ahorro, una mejora más barata que lo que pagas, tu modelo y, solo
+   si no lo sirve nadie fiable, la mejora más cara. «Calidad» ya no gana solo por descarte.
 
 Cada sección tiene su **price cap** (máximo $ por millón de tokens de entrada y de salida):
 descarta proveedores más caros y sale en el bloque para OpenRouter que trae cada tarjeta:

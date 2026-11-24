@@ -233,12 +233,13 @@ class Baseline(unittest.TestCase):
         self.assertIn("Mejor y más barato", label)
 
 
-def ep(provider, pin, pout, quant="fp8", uptime=100, tools=True, cache=None):
+def ep(provider, pin, pout, quant="fp8", uptime=100, tools=True, cache=None, tier=None):
     pricing = {"prompt": str(pin), "completion": str(pout)}
     if cache is not None:
         pricing["input_cache_read"] = str(cache)
     return {"provider_name": provider, "tag": provider.lower(), "quantization": quant, "uptime_last_1d": uptime,
-            "context_length": 10**6, "pricing": pricing, "supported_parameters": ["tools"] if tools else []}
+            "context_length": 10**6, "pricing": pricing, "supported_parameters": ["tools"] if tools else [],
+            "service_tier": tier}
 
 
 class Watermark(unittest.TestCase):
@@ -250,7 +251,7 @@ class Watermark(unittest.TestCase):
         adv = ormp.advise(models, t, lambda mid: (_ for _ in ()).throw(OSError()), None, per_month=10,
                           exclude_authors=("a",))
         self.assertNotIn("a/big", [o.row.model.id for _, o, _ in adv.picks])
-        self.assertEqual(ormp.WATERMARK_AUTHORS, ("google", "openai", "anthropic", "x-ai"))
+        self.assertEqual(ormp.WATERMARK_AUTHORS, ("google", "openai", "anthropic", "x-ai", "meta"))
 
 
 class Advisor(unittest.TestCase):
@@ -275,6 +276,17 @@ class Advisor(unittest.TestCase):
         t = ormp.TASKS["rewrite"]  # tools only matter for coding
         got = {e.provider for e in ormp.parse_endpoints(self.endpoints_for("b/mid")) if ormp.reliable(e, t)}
         self.assertEqual(got, {"Good", "NoTools"})
+
+    def test_flex_tier_is_unreliable_only_for_coding(self):
+        # flex = low-priority queue: slower and may be refused under load, bad for coding agents
+        self.eps["b/mid"] = [ep("Flex", 1e-8, 1e-8, tier="flex"), ep("Prio", 1e-6, 4e-6, tier="priority"),
+                             ep("Good", 5e-7, 2e-6)]
+        eps = ormp.parse_endpoints(self.endpoints_for("b/mid"))
+        self.assertEqual([e.provider for e in eps if ormp.reliable(e, ormp.TASKS["coding"])], ["Prio", "Good"])
+        self.assertIn("Flex", [e.provider for e in eps if ormp.reliable(e, ormp.TASKS["rewrite"])])
+        b = ormp.baseline_row(self.models, ormp.TASKS["coding"], "b/mid")
+        self.assertEqual(ormp.best_offer(b, ormp.TASKS["coding"], self.endpoints_for).endpoint.provider, "Good")
+        self.assertIn("flex", ormp.rejected_because(eps[0], ormp.TASKS["coding"], None, None))
 
     def test_saving_on_own_model_wins_when_quality_is_expensive(self):
         t = ormp.TASKS["rewrite"]
@@ -333,6 +345,61 @@ class Advisor(unittest.TestCase):
         self.assertTrue(all(o.endpoint.model.price_out * 1e6 <= 1.0 for _, o, _ in adv.picks))
         adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10, budget=1e-9)
         self.assertEqual(adv.picks, [])
+
+    def test_own_model_shown_when_reliable_provider_is_dearer_than_catalog(self):
+        # the catalog price comes from a flaky provider: no saving, but the user still sees
+        # their own model with the cheapest reliable provider, and why it costs more
+        self.eps["b/mid"] = [ep("Flaky", 1e-8, 1e-8, uptime=90), ep("Good", 2e-6, 8e-6)]
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10**6)
+        roles = {r: (o, why) for r, o, why in adv.picks}
+        self.assertNotIn("ahorro", roles)
+        own, why = roles["tu_modelo"]
+        self.assertEqual((own.row.model.id, own.endpoint.provider), ("b/mid", "Good"))
+        self.assertIn("Flaky", why)
+        self.assertIn("uptime", why)
+
+    def test_own_model_at_catalog_price_says_so(self):
+        self.eps["b/mid"] = [ep("Same", 0.98e-6, 3.92e-6)]  # 2% under catalog: below the 5% "ahorro" bar
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10**6)
+        why = next(w for r, _, w in adv.picks if r == "tu_modelo")
+        self.assertIn("casi lo mismo que el precio de catálogo (-2%)", why)
+
+    def test_expensive_quality_never_wins_by_default(self):
+        # nothing saves and nothing better is cheaper: keep your model, not a 3x dearer one
+        self.eps["b/mid"] = [ep("Flaky", 1e-8, 1e-8, uptime=90), ep("Good", 2e-6, 8e-6)]
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10**6)
+        self.assertIn("calidad", [r for r, _, _ in adv.picks])
+        self.assertEqual(adv.main, "tu_modelo")
+
+    def upper_models(self):
+        """The fixture plus f/upper, between b/mid and a/big in quality but under 90% of a/big."""
+        cat = {"data": CATALOG["data"] + [cat_model("f/upper", 2e-6, 8e-6)]}
+        bench = {**BENCH, "aa": {**BENCH["aa"], "data": BENCH["aa"]["data"] + [aa("f/upper", 60, 0.85, 55)]}}
+        models, index = ormp.parse_catalog(cat)
+        ormp.attach_benchmarks(models, index, bench)
+        ormp.percentiles(models)
+        self.eps["f/upper"] = [ep("F", 2e-6, 8e-6)]
+        return models
+
+    def test_upgrade_falls_back_to_cheapest_better_model(self):
+        models = self.upper_models()
+        adv = ormp.advise(models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10**6)
+        roles = {r: o for r, o, _ in adv.picks}
+        self.assertEqual(roles["mejora"].row.model.id, "f/upper")  # dearer than b/mid, but the cheapest step up
+        self.assertEqual(roles["calidad"].row.model.id, "a/big")
+        self.assertEqual(adv.main, "ahorro")  # a dearer upgrade never beats the saving
+
+    def test_dearer_upgrade_wins_only_without_own_model(self):
+        models = self.upper_models()
+        self.eps["b/mid"] = [ep("Down", 5e-7, 2e-6, uptime=50)]  # own model not served reliably
+        adv = ormp.advise(models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10**6)
+        self.assertEqual(adv.main, "mejora")
+
+    def test_dearer_upgrade_equal_to_quality_pick_stays_quality(self):
+        # only a/big beats b/mid: the step up is the quality pick, shown once as "calidad"
+        adv = ormp.advise(self.models, ormp.TASKS["rewrite"], self.endpoints_for, "b/mid", per_month=10)
+        self.assertNotIn("mejora", [r for r, _, _ in adv.picks])
+        self.assertEqual(adv.main, "calidad")
 
     def test_fetch_failure_falls_back_to_catalog_price(self):
         def broken(mid):
